@@ -5,6 +5,7 @@ use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use log::*;
+use prost::Message as ProstMessage;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Error, ErrorKind, Result};
 
@@ -31,20 +32,25 @@ impl Services {
     }
 
     async fn handle_request(&mut self, message: Message) -> Result<Option<Message>> {
-        let service = self.inner.get_mut(&message.service);
-        match service {
+        let request = Request::from_message(message);
+        let service = self.inner.get_mut(&request.service());
+        let address = request.address();
+        let response = match service {
             Some(service) => {
-                let response_body = service.handle_request(message.method, &message.body).await;
-                let response = match response_body {
-                    Ok(body) => Message::response(message, body),
-                    Err(error) => Message::error(message, error),
+                let response = service.handle_request(request).await;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => Response::error(error),
                 };
-                Ok(Some(response))
+                Some(response)
             }
-            None => {
-                let response = Message::error(message, "Service not implemented");
-                Ok(Some(response))
-            }
+            None => Some(Response::error("Service not implemented")),
+        };
+        if let Some(mut response) = response {
+            response.set_address(address);
+            Ok(Some(response.take_message()))
+        } else {
+            Ok(None)
         }
     }
 }
@@ -202,9 +208,81 @@ impl Server {
     // }
 }
 
+pub struct Request {
+    message: Message,
+}
+impl Request {
+    pub fn new(service: u64, method: u64, body: impl EncodeBody) -> Self {
+        Request::from_message(Message::request(service, method, body))
+    }
+
+    pub fn from_message(message: Message) -> Self {
+        Self { message }
+    }
+    pub fn method(&self) -> u64 {
+        self.message.method
+    }
+    pub fn service(&self) -> u64 {
+        self.message.service
+    }
+    pub fn body(&self) -> &[u8] {
+        &self.message.body
+    }
+    pub(crate) fn address(&self) -> Address {
+        self.message.address()
+    }
+    // pub(crate) fn set_address(&mut self, address: Address) {
+    //     self.message.set_address(address)
+    // }
+    pub(crate) fn take_message(self) -> Message {
+        self.message
+    }
+}
+
+pub struct Response {
+    message: Message,
+}
+
+/// Service, Method, Id
+type Address = (u64, u64, u64);
+
+impl Response {
+    pub fn from_message(message: Message) -> Self {
+        Self { message }
+    }
+    pub fn from_request(request: Request, body: impl EncodeBody) -> Self {
+        Response::from_message(request.take_message().into_response(Ok(body)))
+    }
+    pub fn error(error: impl ToString) -> Self {
+        Response::from_message(Message::prepare_error(error))
+    }
+    // pub(crate) fn address(&self) -> Address {
+    //     self.message.address()
+    // }
+    pub(crate) fn set_address(&mut self, address: Address) {
+        self.message.set_address(address)
+    }
+    pub(crate) fn take_message(self) -> Message {
+        self.message
+    }
+}
+impl<T> From<T> for Response
+where
+    T: EncodeBody,
+{
+    fn from(body: T) -> Self {
+        Response::from_message(Message::prepare_response(body))
+    }
+}
+impl From<Message> for Response {
+    fn from(message: Message) -> Self {
+        Response::from_message(message)
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Service: Send {
-    async fn handle_request(&mut self, method: u64, body: &Vec<u8>) -> Result<Vec<u8>>;
+    async fn handle_request(&mut self, request: Request) -> Result<Response>;
     fn id(&self) -> u64;
 }
 
@@ -254,12 +332,10 @@ impl Client {
         method: u64,
         body: impl EncodeBody,
     ) -> Result<Vec<u8>> {
-        let body = body.encode_body();
-
+        let request = Request::new(service, method, body);
         let (reply_sender, onreply_recv) = oneshot::channel();
 
-        let message = Message::request(service, method, body);
-
+        let message = request.take_message();
         self.request_sender
             .send((message, reply_sender))
             .await
@@ -267,46 +343,28 @@ impl Client {
         let res = onreply_recv.await;
         let message = res.map_err(|_| Error::new(ErrorKind::Other, "Channel dropped"))?;
         if message.is_error() {
-            let error_message = String::from_utf8(message.body).unwrap();
+            let error_message = String::from_utf8(message.body)
+                .unwrap_or("Error: Cannot decode error message".into());
             Err(Error::new(ErrorKind::Other, error_message))
         } else {
             Ok(message.body)
         }
     }
+
+    pub async fn request_into<T>(
+        &mut self,
+        service: u64,
+        method: u64,
+        body: impl EncodeBody,
+    ) -> Result<T>
+    where
+        T: ProstMessage + Default,
+    {
+        let response_body = self.request(service, method, body).await?;
+        let response_body = T::decode(&response_body[..])?;
+        Ok(response_body)
+    }
 }
 
-// TODO: Maybe have a Request struct, so that handlers get
-// Request<EchoRequest> etc.
-// pub struct Request<T>
-// where
-//     T: ProstMessage + Send,
-// {
-//     service: u64,
-//     method: u64,
-//     id: u64,
-//     body: T,
-// }
-// impl<T> Request<T>
-// where
-//     T: ProstMessage + Send,
-// {
-//     pub fn new(service: u64, method: u64, body: T) -> Request<T> {
-//         Self {
-//             service,
-//             method,
-//             body,
-//             id: 0, // Set later
-//         }
-//     }
-//     pub fn serialize(self) -> Result<Message> {
-//         Ok(Message {
-//             typ: REQUEST,
-//             method: self.method,
-//             service: self.service,
-//             id: self.id,
-//             body: self.body.encode_to_vec()?,
-//         })
-//     }
-// }
 // pub type IncomingRequestSender = mpsc::Sender<Message>;
 // pub type IncomingRequestReceiver = mpsc::Receiver<Message>;

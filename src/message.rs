@@ -1,7 +1,13 @@
 use prost::Message as ProstMessage;
 use std::io::{Error, ErrorKind, Result};
 
-pub trait EncodeBody: ProstMessage + Sized {
+pub trait EncodeBody: Sized {
+    fn encode_body(&self) -> Vec<u8>;
+}
+impl<T> EncodeBody for T
+where
+    T: ProstMessage,
+{
     fn encode_body(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.encoded_len());
         // Should be safe because only error is insufficient capacity,
@@ -11,7 +17,36 @@ pub trait EncodeBody: ProstMessage + Sized {
         buf
     }
 }
-impl<T> EncodeBody for T where T: ProstMessage {}
+// impl<T> EncodeBody for T
+// where
+//     T: From<Vec<u8>>,
+// {
+//     fn encode_body(&self) -> Vec<u8> {
+//         self.into()
+//     }
+// }
+// impl EncodeBody for &[u8] {
+//     fn encode_body(&self) -> Vec<u8> {
+//         self.to_vec()
+//     }
+// }
+
+// pub type HrpcResult<T> = Result<dyn EncodeBody, dyn std::error::Error>;
+
+// pub trait DecodeBody {
+//     fn decode_body<T>(&self, buf: &[u8]) -> Result<T>
+//     where
+//         T: EncodeBody;
+// }
+
+// impl DecodeBody for T
+// where
+//     T: ProstMessage,
+// {
+//     fn decode_body(&self, buf: &[u8]) -> Result<T> {
+//         T::decode(buf)
+//     }
+// }
 // impl EncodeBody for T where T: ProstMessage {}
 
 // pub trait EncodeToVec: ProstMessage {
@@ -28,17 +63,17 @@ impl<T> EncodeBody for T where T: ProstMessage {}
 //     }
 // }
 
-pub fn encode_body<T>(body: T) -> Vec<u8>
-where
-    T: EncodeBody,
-{
-    body.encode_body()
-    // let mut buf = Vec::with_capacity(body.encoded_len());
-    // Should be safe because only error is insufficient capacity,
-    // and we just created the buf with the correct len.
-    // body.encode(&mut buf).unwrap();
-    // buf
-}
+// pub fn encode_body<T>(body: T) -> Vec<u8>
+// where
+//     T: EncodeBody,
+// {
+//     body.encode_body()
+//     // let mut buf = Vec::with_capacity(body.encoded_len());
+//     // Should be safe because only error is insufficient capacity,
+//     // and we just created the buf with the correct len.
+//     // body.encode(&mut buf).unwrap();
+//     // buf
+// }
 
 #[derive(Debug, Clone)]
 pub enum MessageType {
@@ -46,6 +81,8 @@ pub enum MessageType {
     Response,
     Error,
 }
+
+type Address = (u64, u64, u64);
 
 #[derive(Debug)]
 pub struct Message {
@@ -57,13 +94,13 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn request(service: u64, method: u64, body: Vec<u8>) -> Self {
+    pub fn request(service: u64, method: u64, body: impl EncodeBody) -> Self {
         Self {
             typ: MessageType::Request,
             service,
             method,
             id: 0,
-            body,
+            body: body.encode_body(),
         }
     }
 
@@ -80,18 +117,48 @@ impl Message {
     pub fn into_response(self, body: Result<impl EncodeBody>) -> Self {
         match body {
             Err(error) => Message::error(self, error),
-            Ok(body) => Message::response(self, encode_body(body)),
+            Ok(body) => Message::response(self, body.encode_body()),
         }
     }
 
-    pub fn response(request: Message, body: Vec<u8>) -> Self {
+    pub fn prepare_response(body: impl EncodeBody) -> Self {
+        Self {
+            typ: MessageType::Response,
+            body: body.encode_body(),
+            service: 0,
+            method: 0,
+            id: 0,
+        }
+    }
+
+    pub fn prepare_error(body: impl ToString) -> Self {
+        Self {
+            typ: MessageType::Error,
+            body: body.to_string().as_bytes().to_vec(),
+            service: 0,
+            method: 0,
+            id: 0,
+        }
+    }
+
+    pub fn response(request: Message, body: impl EncodeBody) -> Self {
         Self {
             typ: MessageType::Response,
             id: request.id,
             service: request.service,
             method: request.method,
-            body,
+            body: body.encode_body(),
         }
+    }
+
+    pub fn address(&self) -> Address {
+        (self.service, self.method, self.id)
+    }
+
+    pub fn set_address(&mut self, address: Address) {
+        self.service = address.0;
+        self.method = address.1;
+        self.id = address.2;
     }
 
     pub fn from_raw(header: u64, method: u64, id: u64, body: Vec<u8>) -> Result<Self> {

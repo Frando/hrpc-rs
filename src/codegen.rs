@@ -5,8 +5,7 @@ use prost::Message as ProstMessage;
 use std::io::{Error, ErrorKind, Result};
 
 use crate::error_other;
-use crate::message::encode_body;
-use crate::rpc::{RpcClient, Service};
+use crate::rpc::{Request, Response, RpcClient, Service};
 pub use schema::*;
 
 pub mod schema {
@@ -39,31 +38,17 @@ pub mod server {
         fn id(&self) -> u64 {
             1
         }
-        async fn handle_request(&mut self, method: u64, body: &Vec<u8>) -> Result<Vec<u8>> {
-            match method {
+        async fn handle_request(&mut self, request: Request) -> Result<Response> {
+            match request.method() {
                 1 => {
-                    let req = ShoutRequest::decode(&body[..])?;
+                    let req = ShoutRequest::decode(request.body())?;
                     let res = self.inner.shout(req).await?;
-                    Ok(encode_body(res))
+                    Ok(res.into())
                 }
                 _ => error_other!("Invalid method ID"),
             }
         }
     }
-
-    // #[async_trait]
-    // pub trait CalcService {
-    //     const ID: u64 = 2;
-    //     fn __id(&self) -> u64 {
-    //         Self::ID
-    //     }
-    //     async fn add(&mut self, _req: AddRequest) -> Result<CalcResponse> {
-    //         error_other!("Method not implemented")
-    //     }
-    //     async fn square(&mut self, _req: SquareRequest) -> Result<CalcResponse> {
-    //         error_other!("Method not implemented")
-    //     }
-    // }
 }
 
 pub mod client {
@@ -76,9 +61,7 @@ pub mod client {
     impl Client {
         pub fn new() -> (Self, rpc::ClientBuilder) {
             let builder = rpc::ClientBuilder::new();
-            let shouter = Shouter {
-                client: builder.create_client(),
-            };
+            let shouter = Shouter(builder.create_client());
             let app_client = Self { shouter };
             (app_client, builder)
         }
@@ -87,16 +70,11 @@ pub mod client {
     impl RpcClient for Client {}
 
     #[derive(Clone)]
-    pub struct Shouter {
-        client: rpc::Client,
-    }
+    pub struct Shouter(rpc::Client);
     impl Shouter {
         const ID: u64 = 1;
         pub async fn shout(&mut self, req: ShoutRequest) -> Result<ShoutResponse> {
-            self.client
-                .request(Self::ID, 1, req)
-                .await
-                .and_then(|message| ShoutResponse::decode(&message[..]).map_err(|e| e.into()))
+            self.0.request_into(Self::ID, 1, req).await
         }
     }
 }
