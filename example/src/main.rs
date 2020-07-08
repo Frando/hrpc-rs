@@ -4,7 +4,6 @@
 
 use anyhow::{Error, Result};
 use async_std::io;
-use hrpc::{Client, Decoder, Server};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::Arc;
@@ -12,6 +11,7 @@ use async_std::task;
 use async_trait::async_trait;
 use env_logger::Env;
 use futures::stream::StreamExt;
+use hrpc::{Client, Decoder, Rpc};
 use log::*;
 use std::collections::HashMap;
 use std::env;
@@ -21,7 +21,6 @@ pub mod codegen {
 }
 
 use codegen::*;
-
 
 /// Print usage and exit.
 fn usage() {
@@ -48,7 +47,7 @@ pub fn main() -> Result<()> {
 
 async fn onconnection(stream: TcpStream, is_initiator: bool, _ctx: ()) -> Result<()> {
     let instant = std::time::Instant::now();
-    let (mut rpc_server, mut rpc_client) = create_server();
+    let (rpc_server, mut rpc_client) = create_server();
     info!("server and client constructed, {:?}", instant.elapsed());
 
     let client_task = task::spawn(async move {
@@ -65,13 +64,7 @@ async fn onconnection(stream: TcpStream, is_initiator: bool, _ctx: ()) -> Result
         info!("received response after {:?}: {:?}", instant.elapsed(), res);
 
         let instant = std::time::Instant::now();
-        let res = rpc_client
-            .calc
-            .add(AddRequest {
-                a: 0.7,
-                b: 1.3
-            })
-            .await;
+        let res = rpc_client.calc.add(AddRequest { a: 0.7, b: 1.3 }).await;
         info!("received response after {:?}: {:?}", instant.elapsed(), res);
     });
 
@@ -82,8 +75,7 @@ async fn onconnection(stream: TcpStream, is_initiator: bool, _ctx: ()) -> Result
     Ok(())
 }
 
-pub fn create_server() -> (Server, codegen::client::Client) {
-    use codegen::server::{Shouter, ShouterServer};
+pub fn create_server() -> (Rpc, codegen::client::Client) {
     use std::io::Result;
     use std::sync::Arc;
 
@@ -103,16 +95,18 @@ pub fn create_server() -> (Server, codegen::client::Client) {
     #[async_trait]
     impl codegen::server::Calc for Arc<App> {
         async fn add(&mut self, req: AddRequest) -> Result<CalcResponse> {
-            Ok(CalcResponse { result: req.a + req.b })
+            Ok(CalcResponse {
+                result: req.a + req.b,
+            })
         }
     }
 
     let app = Arc::new(App {});
-    let mut server = Server::new();
-    server.define_service(codegen::server::ShouterServer::new(app.clone()));
-    server.define_service(codegen::server::CalcServer::new(app));
-    let client = server.create_client(codegen::client::Client::new());
-    (server, client)
+    let mut rpc = Rpc::new();
+    rpc.define_service(codegen::server::ShouterServer::new(app.clone()));
+    rpc.define_service(codegen::server::CalcServer::new(app));
+    let client = rpc.create_client(codegen::client::Client::new());
+    (rpc, client)
 }
 
 /// A simple async TCP server that calls an async function for each incoming connection.

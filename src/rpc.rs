@@ -1,4 +1,6 @@
 use crate::Decoder;
+use async_std::sync::{Arc, Mutex};
+use async_std::task;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -31,7 +33,7 @@ impl Services {
         self.inner.insert(service.id(), service);
     }
 
-    async fn handle_request(&mut self, message: Message) -> Result<Option<Message>> {
+    async fn handle_request(&mut self, message: Message) -> Option<Message> {
         let request = Request::from_message(message);
         let service = self.inner.get_mut(&request.service());
         let address = request.address();
@@ -48,28 +50,12 @@ impl Services {
         };
         if let Some(mut response) = response {
             response.set_address(address);
-            Ok(Some(response.take_message()))
+            Some(response.take_message())
         } else {
-            Ok(None)
+            None
         }
     }
 }
-pub struct Server {
-    services: Services,
-    outgoing_recv: Option<OutgoingRequestReceiver>,
-}
-
-async fn send_message<W>(writer: &mut W, message: Message) -> Result<()>
-where
-    W: AsyncWrite + Send + Unpin + 'static,
-{
-    debug!("send {:?}", message);
-    let mut buf = vec![0u8; message.encoded_len()];
-    message.encode(&mut buf)?;
-    writer.write_all(&buf).await?;
-    writer.flush().await
-}
-
 struct Sessions<T> {
     inner: HashMap<u64, T>,
     free: VecDeque<u64>,
@@ -106,11 +92,18 @@ impl<T> Sessions<T> {
     }
 }
 
-impl Server {
+type ClientSessions = Sessions<oneshot::Sender<Message>>;
+
+pub struct Rpc {
+    services: Services,
+    outgoing_requests_receiver: Option<OutgoingRequestReceiver>,
+}
+
+impl Rpc {
     pub fn new() -> Self {
         Self {
             services: Services::new(),
-            outgoing_recv: None,
+            outgoing_requests_receiver: None,
         }
     }
 
@@ -122,8 +115,8 @@ impl Server {
     }
 
     // TODO: Rethink define_client / create_client namings.
-    fn define_client(&mut self, outgoing_recv: OutgoingRequestReceiver) {
-        self.outgoing_recv = Some(outgoing_recv)
+    fn define_client(&mut self, outgoing_requests_receiver: OutgoingRequestReceiver) {
+        self.outgoing_requests_receiver = Some(outgoing_requests_receiver)
     }
 
     pub fn create_client<T>(&mut self, client: (T, ClientBuilder)) -> T
@@ -135,73 +128,132 @@ impl Server {
         app_client
     }
 
-    pub async fn connect<S>(&mut self, stream: S) -> Result<()>
+    pub async fn connect<S>(self, stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Clone + Send + Unpin + 'static,
     {
-        let instant = std::time::Instant::now();
         let reader = stream.clone();
-        let mut writer = stream;
-        let mut decoder = Decoder::decode(reader);
+        let writer = stream;
 
-        let mut sessions: Sessions<oneshot::Sender<Message>> = Sessions::new();
-        let mut outgoing_recv = self.outgoing_recv.take().unwrap();
+        let Self {
+            outgoing_requests_receiver,
+            services,
+        } = self;
 
-        loop {
-            debug!("loop in {:?}", instant.elapsed());
-            futures::select! {
-               message = decoder.select_next_some() => {
-                    let message = message?;
-                    debug!("recv {:?}", message);
-                    match message.typ() {
-                        // Incoming request.
-                        MessageType::Request => {
-                            let response = self.services.handle_request(message).await?;
-                            // debug!("created response {:?}", response);
-                            if let Some(message) = response {
-                                send_message(&mut writer, message).await?;
-                            }
-                        }
-                        // Incoming response.
-                        MessageType::Response | MessageType::Error => {
-                            let mut reply_sender = sessions.take(&message.id).unwrap();
-                            reply_sender.send(message).unwrap();
-                        },
-                    };
-               },
-               mut request = outgoing_recv.select_next_some() => {
-                   // TODO: Free and reuse sessions.
-                   // let id = (sessions.len() + 1) as u64;
-                   let (mut message, reply_sender) = request;
-                   let id = sessions.insert(reply_sender);
-                   message.set_request(id);
-                   send_message(&mut writer, message).await?;
+        let services = Arc::new(Mutex::new(services));
 
-               }
-            };
+        let sessions: ClientSessions = Sessions::new();
+        let sessions = Arc::new(Mutex::new(sessions));
+
+        let (outgoing_messages_sender, outgoing_messages_receiver) = mpsc::channel(100);
+
+        let mut tasks = vec![];
+
+        // Task to handle incoming request.
+        tasks.push(task::spawn(incoming(
+            reader,
+            services.clone(),
+            sessions.clone(),
+            outgoing_messages_sender.clone(),
+        )));
+
+        // Task to send outgoing messages.
+        tasks.push(task::spawn(outgoing_send(
+            writer,
+            outgoing_messages_receiver,
+        )));
+
+        // Task to forward outgoing client requests to the send task.
+        if let Some(outgoing_requests_receiver) = outgoing_requests_receiver {
+            tasks.push(task::spawn(outgoing_requests(
+                sessions,
+                outgoing_requests_receiver,
+                outgoing_messages_sender.clone(),
+            )));
         }
+
+        futures::future::join_all(tasks).await;
+
+        Ok(())
     }
+}
 
-    // TODO: Maybe spawn tasks instead of using future::select!
-    // pub async fn connect<S>(self, stream: S) -> Result<()>
-    // where
-    //     S: AsyncRead + AsyncWrite + Clone + Send + Unpin + 'static,
-    // {
-    //     let Self {
-    //         services,
-    //         outgoing_recv,
-    //     } = self;
-    //     let reader = stream.clone();
-    //     let writer = stream;
-    //     let (outgoing_send, outgoing_recv) = mpsc::channel(100);
+async fn incoming<R>(
+    reader: R,
+    services: Arc<Mutex<Services>>,
+    sessions: Arc<Mutex<ClientSessions>>,
+    mut outgoing_messages_sender: mpsc::Sender<Message>,
+) -> Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    let mut decoder = Decoder::decode(reader);
+    while let Some(message) = decoder.next().await {
+        let message = message?;
+        debug!("recv {:?}", message);
+        match message.typ() {
+            // Incoming request.
+            MessageType::Request => {
+                let response = {
+                    let mut services = services.lock().await;
+                    services.handle_request(message).await
+                };
+                if let Some(message) = response {
+                    // TODO: Handle channel drop error?
+                    outgoing_messages_sender.send(message).await.unwrap();
+                };
+            }
+            // Incoming response or error.
+            MessageType::Response | MessageType::Error => {
+                let mut sessions = sessions.lock().await;
+                let reply_sender = sessions.take(&message.id);
+                if let Some(reply_sender) = reply_sender {
+                    reply_sender.send(message).unwrap();
+                } else {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "Received response with invalid request ID",
+                    ));
+                }
+            }
+        };
+    }
+    Ok(())
+}
 
-    //     let read_task = self.read_loop(stream.clone());
-    //     let write_task = self.write_loop(stream.clone());
-    //     let tasks = FuturesUnordered::new();
-    //     loop {
-    //         let reader = self.reader.take();
-    //     }
-    // }
+async fn outgoing_requests(
+    sessions: Arc<Mutex<ClientSessions>>,
+    mut outgoing_requests_receiver: OutgoingRequestReceiver,
+    mut outgoing_messages_sender: mpsc::Sender<Message>,
+) -> Result<()> {
+    while let Some(outgoing_request) = outgoing_requests_receiver.next().await {
+        let (mut message, reply_sender) = outgoing_request;
+        let id = {
+            let mut sessions = sessions.lock().await;
+            sessions.insert(reply_sender)
+        };
+        message.set_request(id);
+        // TODO: Handle dropped channel / map err?
+        outgoing_messages_sender.send(message).await.unwrap();
+    }
+    Ok(())
+}
+
+async fn outgoing_send<W>(
+    mut writer: W,
+    mut outgoing_messages_receiver: mpsc::Receiver<Message>,
+) -> Result<()>
+where
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    while let Some(message) = outgoing_messages_receiver.next().await {
+        debug!("send {:?}", message);
+        let mut buf = vec![0u8; message.encoded_len()];
+        message.encode(&mut buf)?;
+        writer.write_all(&buf).await?;
+        writer.flush().await?;
+    }
+    Ok(())
 }
 
 pub struct Request {
