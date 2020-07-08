@@ -1,4 +1,5 @@
 use prost::Message as ProstMessage;
+use std::fmt;
 use std::io::{Error, ErrorKind, Result};
 
 pub trait EncodeBody: Sized {
@@ -84,13 +85,26 @@ pub enum MessageType {
 
 type Address = (u64, u64, u64);
 
-#[derive(Debug)]
 pub struct Message {
     pub typ: MessageType,
     pub service: u64,
     pub method: u64,
     pub id: u64,
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Message {{ typ {:?}, service {}, method {}, id {}, body len {} }}",
+            self.typ,
+            self.service,
+            self.method,
+            self.id,
+            self.body.len()
+        )
+    }
 }
 
 impl Message {

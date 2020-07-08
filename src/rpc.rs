@@ -63,7 +63,7 @@ async fn send_message<W>(writer: &mut W, message: Message) -> Result<()>
 where
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    debug!("send message {:?}", message);
+    debug!("send {:?}", message);
     let mut buf = vec![0u8; message.encoded_len()];
     message.encode(&mut buf)?;
     writer.write_all(&buf).await?;
@@ -140,15 +140,11 @@ impl Server {
         S: AsyncRead + AsyncWrite + Clone + Send + Unpin + 'static,
     {
         let instant = std::time::Instant::now();
-        info!("connect in {:?}", instant.elapsed());
         let reader = stream.clone();
         let mut writer = stream;
-        info!("dec pre {:?}", instant.elapsed());
         let mut decoder = Decoder::decode(reader);
-        info!("dec post {:?}", instant.elapsed());
 
         let mut sessions: Sessions<oneshot::Sender<Message>> = Sessions::new();
-        // let mut sessions: HashMap<u64, Option<oneshot::Sender<Message>>> = HashMap::new();
         let mut outgoing_recv = self.outgoing_recv.take().unwrap();
 
         loop {
@@ -156,12 +152,12 @@ impl Server {
             futures::select! {
                message = decoder.select_next_some() => {
                     let message = message?;
-                    debug!("incoming {:?}", message);
+                    debug!("recv {:?}", message);
                     match message.typ() {
                         // Incoming request.
                         MessageType::Request => {
                             let response = self.services.handle_request(message).await?;
-                            debug!("created response {:?}", response);
+                            // debug!("created response {:?}", response);
                             if let Some(message) = response {
                                 send_message(&mut writer, message).await?;
                             }
