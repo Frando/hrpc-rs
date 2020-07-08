@@ -1,0 +1,29 @@
+[package]
+name = "hrpc-build"
+version = "0.0.1"
+authors = ["Franz Heinzmann <frando@unbiskant.org>"]
+edition = "2018"
+license = "MIT"
+documentation = "https://docs.rs/tonic/0.2.0/tonic/"
+repository = "https://github.com/Frando/hrpc"
+homepage = "https://github.com/Frando/hrpc"
+description = """
+Codegen module for hrpc RPC library
+"""
+readme = "README.md"
+categories = ["network-programming", "asynchronous"]
+keywords = ["rpc", "async", "codegen", "protobuf"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+
+[dependencies]
+prost-build = "0.6"
+quote = "1.0"
+proc-macro2 = "1.0"
+heck = "0.3.1"
+
+[features]
+default = ["rustfmt"]
+rustfmt = []
