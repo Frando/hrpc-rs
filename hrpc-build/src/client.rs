@@ -7,6 +7,7 @@ pub fn generate(service: &prost_build::Service, service_id: u64) -> TokenStream 
     let methods = generate_methods(service);
 
     quote! {
+        #[derive(Clone)]
         pub struct #service_ident(hrpc::Client);
         impl #service_ident {
             const ID: u64 = #service_id;
@@ -55,6 +56,7 @@ pub fn generate_wrapper(services: &Vec<prost_build::Service>) -> TokenStream {
     }
 
     quote! {
+        #[derive(Clone)]
         pub struct Client {
             #fields
         }

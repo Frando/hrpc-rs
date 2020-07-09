@@ -257,10 +257,6 @@ impl VarintParser {
     }
     fn recv(&mut self, buf: &[u8]) -> Result<(usize, Option<u64>)> {
         for (i, byte) in buf[..].iter().enumerate() {
-            // Ignore empty keepalive bytes.
-            if byte == &0 {
-                continue;
-            }
             self.varint += (*byte as u64 & 127) * self.factor;
             if self.varint > u64::max_value() {
                 return Err(Error::new(ErrorKind::InvalidInput, "Invalid varint"));

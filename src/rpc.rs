@@ -2,6 +2,7 @@ use crate::Decoder;
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
 use futures::channel::mpsc;
+// use async_std::channel as mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::sink::SinkExt;
@@ -37,16 +38,27 @@ impl Services {
         let request = Request::from_message(message);
         let service = self.inner.get_mut(&request.service());
         let address = request.address();
+        let id = request.id();
         let response = match service {
             Some(service) => {
                 let response = service.handle_request(request).await;
-                let response = match response {
-                    Ok(response) => response,
-                    Err(error) => Response::error(error),
-                };
-                Some(response)
+                if id != 0 {
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(error) => Response::error(error),
+                    };
+                    Some(response)
+                } else {
+                    None
+                }
             }
-            None => Some(Response::error("Service not implemented")),
+            None => {
+                if id != 0 {
+                    Some(Response::error("Service not implemented"))
+                } else {
+                    None
+                }
+            }
         };
         if let Some(mut response) = response {
             response.set_address(address);
@@ -134,7 +146,14 @@ impl Rpc {
     {
         let reader = stream.clone();
         let writer = stream;
+        self.connect_rw(reader, writer).await
+    }
 
+    pub async fn connect_rw<R, W>(self, reader: R, writer: W) -> Result<()>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
         let Self {
             outgoing_requests_receiver,
             services,
@@ -275,6 +294,9 @@ impl Request {
     }
     pub fn body(&self) -> &[u8] {
         &self.message.body
+    }
+    pub fn id(&self) -> u64 {
+        self.message.id
     }
     pub(crate) fn address(&self) -> Address {
         self.message.address()

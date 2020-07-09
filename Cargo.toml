@@ -21,4 +21,4 @@ env_logger = "0.7.1"
 anyhow = "1.0.31"
 
 [workspace]
-members = ["hrpc-build", "example"]
+members = ["hrpc-build", "examples/*"]
