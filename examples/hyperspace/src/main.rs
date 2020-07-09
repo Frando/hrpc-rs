@@ -25,17 +25,19 @@ use codegen::*;
 mod freemap;
 mod session;
 
+use session::RemoteCorestore;
+
 #[async_std::main]
 pub async fn main() -> Result<()> {
     env_logger::from_env(Env::default().default_filter_or("info")).init();
     let path = "/tmp/hrpc.sock";
     let socket = UnixStream::connect(path).await?;
     let mut rpc = Rpc::new();
-    let mut corestore = session::RemoteCorestore::new(&mut rpc);
+    let mut corestore = RemoteCorestore::new(&mut rpc);
     task::spawn(async move {
         rpc.connect(socket).await.unwrap();
     });
-    let mut core = corestore.open_by_name("first".into()).await?;
+    let mut core = corestore.open_by_name("first").await?;
     info!("core start {:?}", core.read().await);
 
     let core_clone = core.clone();

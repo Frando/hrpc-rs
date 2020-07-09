@@ -65,7 +65,7 @@ where
             }
             if consumed == 0 {
                 // TODO: See if we can enforce this statically.
-                panic!("Parser is broken: did not consume any bytes");
+                unreachable!("Parser is broken: did not consume any bytes");
             }
         }
         self.parser = Some(parser);
@@ -102,20 +102,6 @@ where
 
             // Consume all the data we read.
             self.parse(n)?;
-            // let mut parser = self.parser.take().unwrap();
-            // let mut ptr = 0;
-            // while ptr < n {
-            //     let (consumed, message) = parser.recv(&self.buf[ptr..n])?;
-            //     ptr += consumed;
-            //     if let Some(message) = message {
-            //         self.messages.push_back(message);
-            //     }
-            //     if consumed == 0 {
-            //         // TODO: See if we can enforce this statically.
-            //         panic!("Parser is broken: did not consume any bytes");
-            //     }
-            // }
-            // self.parser = Some(parser);
         }
     }
 }
@@ -148,7 +134,6 @@ impl Parser {
         }
     }
     pub fn recv(&mut self, buf: &[u8]) -> Result<(usize, Option<Message>)> {
-        // let state = self.state;
         trace!("RECV {:?} {:?}", self.state, buf);
         match self.state {
             State::Length | State::Header | State::Method | State::Id => {

@@ -46,7 +46,8 @@ impl RemoteCorestore {
         Ok(core)
     }
 
-    pub async fn open_by_name(&mut self, name: String) -> Result<RemoteHypercore> {
+    pub async fn open_by_name(&mut self, name: impl ToString) -> Result<RemoteHypercore> {
+        let name = name.to_string();
         if let Some(mut core) = self.sessions.get_by_name(&name) {
             core.open().await?;
             return Ok(core);
@@ -104,6 +105,11 @@ impl RemoteHypercore {
     async fn id(&self) -> u64 {
         self.inner.read().await.id
     }
+
+    // async fn key(&self) -> &'_ Option<Vec<u8>> {
+    //     let inner = self.inner.read().await;.key;
+    //     &key
+    // }
 
     pub async fn read(&self) -> RwLockReadGuard<'_, InnerHypercore> {
         self.inner.read().await

@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub struct NamedMap<K, V>
 where
     K: Clone + Eq + Hash,
+    V: Clone,
 {
     inner: Arc<RwLock<InnerMap<K, V>>>,
 }
@@ -16,6 +17,7 @@ where
 struct InnerMap<K, V>
 where
     K: Clone + Eq + Hash,
+    V: Clone,
 {
     map: HashMap<u64, V>,
     name_id: HashMap<K, u64>,
@@ -26,6 +28,7 @@ where
 impl<K, V> InnerMap<K, V>
 where
     K: Clone + Eq + Hash,
+    V: Clone,
 {
     fn new() -> Self {
         Self {
@@ -118,67 +121,3 @@ where
         self.inner.write().remove(id)
     }
 }
-
-// pub struct FreeMap<T> {
-//     map: HashMap<u64, Option<T>>,
-//     free: VecDeque<u64>,
-// }
-
-// impl<T> FreeMap<T>
-// where
-//     T: Clone,
-// {
-//     pub fn new() -> Self {
-//         Self {
-//             map: HashMap::new(),
-//             free: VecDeque::new(),
-//         }
-//     }
-
-//     pub fn alloc(&mut self) -> u64 {
-//         let id = if let Some(id) = self.free.pop_front() {
-//             id
-//         } else {
-//             self.map.len() as u64 + 1
-//         };
-//         self.map.insert(id, None);
-//         id
-//     }
-
-//     pub fn get(&self, id: &u64) -> Option<T> {
-//         let item = self.map.get(id);
-//         match item {
-//             None => None,
-//             Some(None) => None,
-//             Some(Some(item)) => Some(item.clone()),
-//         }
-//         // self.map.get(id).take().unwrap_or_else(|| &None)
-//     }
-
-//     pub fn get_mut(&mut self, id: &u64) -> Option<&mut T> {
-//         let item = self.map.get_mut(id);
-//         match item {
-//             None => None,
-//             Some(None) => None,
-//             Some(Some(item)) => Some(item),
-//         }
-//     }
-
-//     pub fn has(&self, id: &u64) -> bool {
-//         self.map.get(id).is_some()
-//     }
-
-//     pub fn insert(&mut self, id: u64, item: T) -> u64 {
-//         self.map.insert(id, Some(item));
-//         id
-//     }
-
-//     pub fn free(&mut self, id: &u64) -> Option<T> {
-//         if let Some(item) = self.map.remove(id) {
-//             self.free.push_back(*id);
-//             item
-//         } else {
-//             None
-//         }
-//     }
-// }

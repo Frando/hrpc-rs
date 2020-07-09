@@ -22,3 +22,6 @@ anyhow = "1.0.31"
 
 [workspace]
 members = ["hrpc-build", "examples/*"]
+
+[profile.release]
+lto = true
