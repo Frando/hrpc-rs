@@ -2,14 +2,17 @@ use crate::codegen;
 use crate::codegen::client::Client;
 use crate::codegen::*;
 use crate::freemap::NamedMap;
-use async_std::sync::{Mutex, RwLock, RwLockReadGuard};
+use async_std::sync::{RwLock, RwLockReadGuard};
 use async_trait::async_trait;
+use futures::stream::Stream;
 use hrpc::Rpc;
-use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use crate::ReadStream;
 
 type Key = Vec<u8>;
 type Sessions = NamedMap<String, RemoteHypercore>;
@@ -23,7 +26,7 @@ pub struct RemoteCorestore {
 
 impl RemoteCorestore {
     pub fn new(rpc: &mut Rpc) -> Self {
-        let client = rpc.create_client(Client::new());
+        let client = Client::new(rpc.client());
         let corestore = Self {
             client,
             sessions: NamedMap::new(),
@@ -106,11 +109,6 @@ impl RemoteHypercore {
         self.inner.read().await.id
     }
 
-    // async fn key(&self) -> &'_ Option<Vec<u8>> {
-    //     let inner = self.inner.read().await;.key;
-    //     &key
-    // }
-
     pub async fn read(&self) -> RwLockReadGuard<'_, InnerHypercore> {
         self.inner.read().await
     }
@@ -148,6 +146,11 @@ impl RemoteHypercore {
             .await?;
 
         Ok(res.block)
+    }
+
+    pub fn create_read_stream(&mut self, start: Option<u64>, end: Option<u64>) -> ReadStream {
+        ReadStream::new(self.clone(), start.unwrap_or_default(), end, false)
+        // crate::stream::create_read_stream(self.clone(), start.unwrap_or_default(), end, false)
     }
 
     async fn open(&mut self) -> Result<()> {
