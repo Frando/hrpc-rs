@@ -16,6 +16,16 @@ pub fn generate(service: &prost_build::Service, service_id: u64) -> TokenStream 
             }
             #methods
         }
+        impl From<hrpc::Client> for #service_ident {
+            fn from(client: hrpc::Client) -> #service_ident {
+                #service_ident::new(client)
+            }
+        }
+        impl From<&hrpc::Client> for #service_ident {
+            fn from(client: &hrpc::Client) -> #service_ident {
+                #service_ident::new(client.clone())
+            }
+        }
     }
 }
 
@@ -48,7 +58,7 @@ pub fn generate_wrapper(services: &Vec<prost_build::Service>) -> TokenStream {
             pub #field_ident: #struct_ident,
         });
         build.extend(quote! {
-            let #field_ident = #struct_ident::new(builder.create_client());
+            let #field_ident = #struct_ident::new(client.clone());
         });
         fieldlist.extend(quote! {
             #field_ident,
@@ -58,20 +68,33 @@ pub fn generate_wrapper(services: &Vec<prost_build::Service>) -> TokenStream {
     quote! {
         #[derive(Clone)]
         pub struct Client {
+            __client: hrpc::Client,
             #fields
         }
 
         impl Client {
-            pub fn new() -> (Self, hrpc::ClientBuilder) {
-                let builder = hrpc::ClientBuilder::new();
+            pub fn new(client: hrpc::Client) -> Self {
 
                 #build
 
-                let app_client = Self { #fieldlist };
-                (app_client, builder)
+                Self {
+                    __client: client,
+                    #fieldlist
+                }
             }
         }
 
         impl hrpc::RpcClient for Client {}
+
+        impl From<hrpc::Client> for Client {
+            fn from(client: hrpc::Client) -> Client {
+                Client::new(client)
+            }
+        }
+        impl From<&hrpc::Client> for Client {
+            fn from(client: &hrpc::Client) -> Client {
+                Client::new(client.clone())
+            }
+        }
     }
 }

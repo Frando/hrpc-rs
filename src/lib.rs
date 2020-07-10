@@ -8,4 +8,4 @@ pub mod transport;
 
 pub use decode::Decoder;
 pub use message::Message;
-pub use rpc::{Client, ClientBuilder, Request, Response, Rpc, RpcClient, Service};
+pub use rpc::{Client, Request, Response, Rpc, RpcClient, Service};

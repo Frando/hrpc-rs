@@ -34,8 +34,7 @@ impl Services {
         self.inner.insert(service.id(), service);
     }
 
-    async fn handle_request(&mut self, message: Message) -> Option<Message> {
-        let request = Request::from_message(message);
+    async fn handle_request(&mut self, request: Request) -> Option<Message> {
         let service = self.inner.get_mut(&request.service());
         let address = request.address();
         let id = request.id();
@@ -108,14 +107,18 @@ type ClientSessions = Sessions<oneshot::Sender<Message>>;
 
 pub struct Rpc {
     services: Services,
-    outgoing_requests_receiver: Option<OutgoingRequestReceiver>,
+    client: Client,
+    outgoing_requests_receiver: OutgoingRequestReceiver,
 }
 
 impl Rpc {
     pub fn new() -> Self {
+        let services = Services::new();
+        let (client, outgoing_requests_receiver) = Client::new();
         Self {
-            services: Services::new(),
-            outgoing_requests_receiver: None,
+            services,
+            client,
+            outgoing_requests_receiver,
         }
     }
 
@@ -126,27 +129,15 @@ impl Rpc {
         self.services.insert(Box::new(service));
     }
 
-    // TODO: Rethink define_client / create_client namings.
-    fn define_client(&mut self, outgoing_requests_receiver: OutgoingRequestReceiver) {
-        self.outgoing_requests_receiver = Some(outgoing_requests_receiver)
-    }
-
-    pub fn create_client<T>(&mut self, client: (T, ClientBuilder)) -> T
-    where
-        T: RpcClient,
-    {
-        let (app_client, rpc_client_builder) = client;
-        self.define_client(rpc_client_builder.take_receiver());
-        app_client
+    pub fn client(&mut self) -> Client {
+        self.client.clone()
     }
 
     pub async fn connect<S>(self, stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Clone + Send + Unpin + 'static,
     {
-        let reader = stream.clone();
-        let writer = stream;
-        self.connect_rw(reader, writer).await
+        self.connect_rw(stream.clone(), stream).await
     }
 
     pub async fn connect_rw<R, W>(self, reader: R, writer: W) -> Result<()>
@@ -157,6 +148,7 @@ impl Rpc {
         let Self {
             outgoing_requests_receiver,
             services,
+            client: _client,
         } = self;
 
         let services = Arc::new(Mutex::new(services));
@@ -183,13 +175,11 @@ impl Rpc {
         )));
 
         // Task to forward outgoing client requests to the send task.
-        if let Some(outgoing_requests_receiver) = outgoing_requests_receiver {
-            tasks.push(task::spawn(outgoing_requests(
-                sessions,
-                outgoing_requests_receiver,
-                outgoing_messages_sender.clone(),
-            )));
-        }
+        tasks.push(task::spawn(outgoing_requests(
+            sessions,
+            outgoing_requests_receiver,
+            outgoing_messages_sender.clone(),
+        )));
 
         futures::future::join_all(tasks).await;
 
@@ -213,9 +203,10 @@ where
         match message.typ() {
             // Incoming request.
             MessageType::Request => {
+                let request = Request::from_message(message);
                 let response = {
                     let mut services = services.lock().await;
-                    services.handle_request(message).await
+                    services.handle_request(request).await
                 };
                 if let Some(message) = response {
                     // TODO: Handle channel drop error?
@@ -265,11 +256,14 @@ async fn outgoing_send<W>(
 where
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    // TODO: Don't allocate for each message.
+    // let buf = vec![0u8; MAX_MESSAGE_SIZE];
     while let Some(message) = outgoing_messages_receiver.next().await {
         debug!("send {:?}", message);
         let mut buf = vec![0u8; message.encoded_len()];
-        message.encode(&mut buf)?;
-        writer.write_all(&buf).await?;
+        // let len = message.encoded_len();
+        message.encode(&mut buf[..])?;
+        writer.write_all(&buf[..]).await?;
         writer.flush().await?;
     }
     Ok(())
@@ -356,30 +350,8 @@ pub trait Service: Send {
     fn id(&self) -> u64;
 }
 
+// Marker trait for Codegen clients.
 pub trait RpcClient {}
-
-pub struct ClientBuilder {
-    client: Client,
-    request_receiver: OutgoingRequestReceiver,
-}
-
-impl ClientBuilder {
-    pub fn new() -> Self {
-        let (client, request_receiver) = Client::new();
-        Self {
-            client,
-            request_receiver,
-        }
-    }
-
-    pub fn create_client(&self) -> Client {
-        self.client.clone()
-    }
-
-    pub fn take_receiver(self) -> OutgoingRequestReceiver {
-        self.request_receiver
-    }
-}
 
 #[derive(Clone)]
 pub struct Client {
