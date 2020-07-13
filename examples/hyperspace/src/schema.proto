@@ -1,6 +1,6 @@
 syntax = "proto2";
-package codegen;
 
+package codegen;
 message Void {}
 
 // General Structs

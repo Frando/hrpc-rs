@@ -2,15 +2,20 @@ use crate::codegen;
 use crate::codegen::client::Client;
 use crate::codegen::*;
 use crate::freemap::NamedMap;
-use async_std::sync::{RwLock, RwLockReadGuard};
+use futures::channel::mpsc;
+use futures::future;
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
+// use async_std::sync::{RwLock, RwLockReadGuard};
 use async_trait::async_trait;
 use hrpc::Rpc;
+use parking_lot::{RwLock, RwLockReadGuard};
 use std::fmt;
 use std::io::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::ReadStream;
+use crate::{ByteStream, ReadStream};
 
 type Key = Vec<u8>;
 type Sessions = NamedMap<String, RemoteHypercore>;
@@ -58,7 +63,7 @@ impl RemoteCorestore {
         core.set_id(id).await;
         core.open().await?;
 
-        let key = core.inner.read().await.key.clone();
+        let key = core.inner.read().key.clone();
         if let Some(key) = key {
             let hkey = hex::encode(key);
             self.sessions.set_name(id, hkey);
@@ -69,12 +74,11 @@ impl RemoteCorestore {
 
 #[async_trait]
 impl codegen::server::Hypercore for RemoteCorestore {
-    async fn on_append(&mut self, req: AppendEvent) -> Result<Void> {
-        eprintln!("onappend! {:?}", req);
+    async fn on_append(&mut self, req: AppendEvent) -> Result<()> {
         if let Some(core) = self.sessions.get(req.id) {
             core.on_append(req.length, req.byte_length).await
         }
-        Ok(Void {})
+        Ok(())
     }
 }
 
@@ -83,6 +87,11 @@ pub struct RemoteHypercore {
     inner: Arc<RwLock<InnerHypercore>>,
     client: Client,
     resource_counter: Arc<AtomicU64>,
+}
+impl fmt::Debug for RemoteHypercore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.inner.read())
+    }
 }
 
 impl RemoteHypercore {
@@ -101,20 +110,27 @@ impl RemoteHypercore {
     }
 
     async fn set_id(&mut self, id: u64) {
-        self.inner.write().await.id = id;
+        self.inner.write().id = id;
     }
 
     async fn id(&self) -> u64 {
-        self.inner.read().await.id
+        self.inner.read().id
     }
 
-    pub async fn read(&self) -> RwLockReadGuard<'_, InnerHypercore> {
-        self.inner.read().await
+    pub fn len(&self) -> u64 {
+        self.inner.read().length
     }
+
+    pub fn byte_length(&self) -> u64 {
+        self.inner.read().byte_length
+    }
+
+    // pub fn read(&self) -> RwLockReadGuard<'_, InnerHypercore> {
+    //     self.inner.read()
+    // }
 
     pub async fn append(&mut self, blocks: Vec<Vec<u8>>) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        let id = inner.id;
+        let id = self.inner.read().id;
         let res = self
             .client
             .hypercore
@@ -123,13 +139,14 @@ impl RemoteHypercore {
                 blocks,
             })
             .await?;
+        let mut inner = self.inner.write();
         inner.length = res.length;
         inner.byte_length = res.byte_length;
         Ok(())
     }
 
     pub async fn get(&mut self, seq: u64) -> Result<Option<Vec<u8>>> {
-        let id = self.inner.read().await.id;
+        let id = self.inner.read().id;
         let resource_id = self.resource_counter.fetch_add(1, Ordering::SeqCst);
         let res = self
             .client
@@ -147,18 +164,45 @@ impl RemoteHypercore {
         Ok(res.block)
     }
 
-    pub fn create_read_stream(&mut self, start: Option<u64>, end: Option<u64>) -> ReadStream {
-        ReadStream::new(self.clone(), start.unwrap_or_default(), end, false)
-        // crate::stream::create_read_stream(self.clone(), start.unwrap_or_default(), end, false)
+    pub async fn seek(&mut self, byte_offset: u64) -> Result<(u64, usize)> {
+        let id = self.inner.read().id;
+        let res = self
+            .client
+            .hypercore
+            .seek(SeekRequest {
+                id: id as u32,
+                byte_offset,
+                start: None,
+                end: None,
+                wait: None,
+                if_available: None,
+            })
+            .await?;
+        Ok((res.seq, res.block_offset as usize))
+    }
+
+    pub fn to_stream(&mut self, start: u64, end: Option<u64>, live: bool) -> ReadStream {
+        ReadStream::new(self.clone(), start, end, live)
+    }
+
+    pub fn to_reader(&mut self) -> ByteStream {
+        ByteStream::new(self.clone())
+    }
+
+    pub fn subscribe(&mut self) -> mpsc::Receiver<HypercoreEvent> {
+        self.inner.write().subscribe()
+    }
+
+    pub(crate) async fn emit(&mut self, event: HypercoreEvent) {
+        self.inner.write().emit(event).await
     }
 
     async fn open(&mut self) -> Result<()> {
-        let open = self.inner.read().await.open;
-        if open {
+        if self.inner.read().open {
             return Ok(());
         }
         let req = {
-            let inner = self.inner.read().await;
+            let inner = self.inner.read();
             OpenRequest {
                 id: inner.id as u32,
                 key: inner.key.clone(),
@@ -167,19 +211,31 @@ impl RemoteHypercore {
             }
         };
         let res = self.client.corestore.open(req).await?;
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.write();
         inner.key = Some(res.key);
         inner.open = true;
+        inner.length = res.length;
+        inner.byte_length = res.byte_length;
+        inner.writable = res.writable;
         Ok(())
     }
 
     pub(crate) async fn on_append(&self, length: u64, byte_length: u64) {
-        eprintln!("onappend");
-        let mut inner = self.inner.write().await;
-        eprintln!("write lock acquired");
-        // inner.length = length;
-        // inner.byte_length = byte_length;
+        let mut inner = self.inner.write();
+        inner.length = length;
+        inner.byte_length = byte_length;
+
+        let event = HypercoreEvent::Append;
+        let mut listeners = inner.listeners.clone();
+        let futs = listeners.iter_mut().map(|s| s.send(event.clone()));
+        let _ = future::join_all(futs).await;
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum HypercoreEvent {
+    Append,
+    Download,
 }
 
 #[derive(Default)]
@@ -191,6 +247,19 @@ pub struct InnerHypercore {
     pub byte_length: u64,
     pub writable: bool,
     pub open: bool,
+    pub listeners: Vec<mpsc::Sender<HypercoreEvent>>,
+}
+
+impl InnerHypercore {
+    fn subscribe(&mut self) -> mpsc::Receiver<HypercoreEvent> {
+        let (send, recv) = mpsc::channel(100);
+        self.listeners.push(send);
+        recv
+    }
+    async fn emit(&mut self, event: HypercoreEvent) {
+        let futs = self.listeners.iter_mut().map(|s| s.send(event.clone()));
+        let _ = future::join_all(futs).await;
+    }
 }
 
 impl fmt::Debug for InnerHypercore {
