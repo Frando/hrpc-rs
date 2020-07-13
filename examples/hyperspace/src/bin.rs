@@ -22,12 +22,17 @@ use std::sync::Mutex;
 use hyperspace_client::codegen;
 use hyperspace_client::{RemoteCorestore, RemoteHypercore};
 
+fn usage() {
+    eprintln!("usage: hyperspace-client <name> [read|write]");
+    std::process::exit(1);
+}
+
 #[async_std::main]
 pub async fn main() -> Result<()> {
     env_logger::from_env(Env::default().default_filter_or("info")).init();
     let name = env::args().nth(1).unwrap_or("first".into());
     let mode = env::args().nth(2).unwrap_or("".into());
-    let path = "/tmp/hrpc.sock";
+    let path = "/tmp/hyperspace.sock";
     let socket = UnixStream::connect(path).await?;
     let mut rpc = Rpc::new();
     let mut corestore = RemoteCorestore::new(&mut rpc);
@@ -46,7 +51,7 @@ pub async fn main() -> Result<()> {
             let write_task = task::spawn(write(core.clone(), BufReader::new(io::stdin())));
             tasks.push(write_task)
         }
-        _ => panic!("usage: hyperspace-client <name> [read|write]"),
+        _ => usage(),
     }
 
     futures::future::join_all(tasks).await;

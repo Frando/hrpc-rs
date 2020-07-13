@@ -241,6 +241,7 @@ service Hypercore {
   rpc Download (DownloadRequest) returns (Void);
   rpc Downloaded (DownloadedRequest) returns (DownloadedResponse);
   rpc Undownload (UndownloadRequest) returns (Void);
+  rpc Cancel2 (CancelRequest) returns (Void);
   rpc Close (CloseRequest) returns (Void);
   rpc RegisterExtension (RegisterExtensionRequest) returns (Void);
   rpc UnregisterExtension (UnregisterExtensionRequest) returns (Void);

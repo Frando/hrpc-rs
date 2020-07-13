@@ -4,10 +4,8 @@ use crate::codegen::*;
 use crate::freemap::NamedMap;
 use async_std::sync::{RwLock, RwLockReadGuard};
 use async_trait::async_trait;
-use futures::stream::Stream;
 use hrpc::Rpc;
 use std::fmt;
-use std::future::Future;
 use std::io::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -72,6 +70,7 @@ impl RemoteCorestore {
 #[async_trait]
 impl codegen::server::Hypercore for RemoteCorestore {
     async fn on_append(&mut self, req: AppendEvent) -> Result<Void> {
+        eprintln!("onappend! {:?}", req);
         if let Some(core) = self.sessions.get(req.id) {
             core.on_append(req.length, req.byte_length).await
         }
@@ -175,9 +174,11 @@ impl RemoteHypercore {
     }
 
     pub(crate) async fn on_append(&self, length: u64, byte_length: u64) {
+        eprintln!("onappend");
         let mut inner = self.inner.write().await;
-        inner.length = length;
-        inner.byte_length = byte_length;
+        eprintln!("write lock acquired");
+        // inner.length = length;
+        // inner.byte_length = byte_length;
     }
 }
 

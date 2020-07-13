@@ -1,5 +1,4 @@
-use chashmap::{CHashMap, ReadGuard};
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
