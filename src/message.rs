@@ -18,6 +18,21 @@ where
         buf
     }
 }
+
+// pub trait DecodeBody: Sized {
+//     fn decode_body(body: &[u8]) -> Result<Self>;
+// }
+
+// impl<T> DecodeBody for T
+// where
+//     T: ProstMessage + Default,
+// {
+//     fn decode_body(body: &[u8]) -> Result<Self> {
+//         let body = T::decode(body)?;
+//         Ok(body)
+//     }
+// }
+
 // impl<T> EncodeBody for T
 // where
 //     T: From<Vec<u8>>,

@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream;
 use prost_build::Config;
+use quote::quote;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 
@@ -14,11 +15,13 @@ where
 {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     eprintln!(
-        "build! protos {:?} into {:?}",
+        "build hrpc protocol from {:?} into {:?}",
         protos.iter().map(|p| p.as_ref()).collect::<Vec<&Path>>(),
         out_dir
     );
+
     let mut config = Config::new();
+    config.extern_path(".codegen.Void", "Void");
     config.out_dir(out_dir.clone());
     config.service_generator(Box::new(ServiceGenerator::new()));
 
@@ -69,10 +72,15 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
     }
 
     fn finalize(&mut self, buf: &mut String) {
+        let encodings = quote! {
+            pub type Void = ();
+        };
+        buf.push_str(&encodings.to_string());
+
         if !self.clients.is_empty() {
             let clients = &self.clients;
             let wrapper = client::generate_wrapper(&self.services);
-            let client_service = quote::quote! {
+            let client_module = quote! {
                 pub mod client {
                     use super::*;
                     use prost::Message;
@@ -81,13 +89,12 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
                     #clients
                 }
             };
-            let code = format!("{}", client_service);
-            buf.push_str(&code);
+            buf.push_str(&client_module.to_string());
             self.clients = TokenStream::default();
         }
         if !self.servers.is_empty() {
             let servers = &self.servers;
-            let client_service = quote::quote! {
+            let server_module = quote! {
                 pub mod server {
                     use super::*;
                     use async_trait::async_trait;
@@ -97,8 +104,7 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
                     #servers
                 }
             };
-            let code = format!("{}", client_service);
-            buf.push_str(&code);
+            buf.push_str(&server_module.to_string());
             self.servers = TokenStream::default();
         }
     }

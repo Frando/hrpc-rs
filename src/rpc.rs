@@ -218,7 +218,8 @@ where
                 let mut sessions = sessions.lock().await;
                 let reply_sender = sessions.take(&message.id);
                 if let Some(reply_sender) = reply_sender {
-                    reply_sender.send(message).unwrap();
+                    // Ignore errors on dropped reply receivers.
+                    let _ = reply_sender.send(message);
                 } else {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
