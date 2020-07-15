@@ -2,15 +2,19 @@ use crate::Decoder;
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
 use futures::channel::mpsc;
-// use async_std::channel as mpsc;
 use futures::channel::oneshot;
+use futures::future::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use log::*;
 use prost::Message as ProstMessage;
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io::{Error, ErrorKind, Result};
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::message::{EncodeBody, Message, MessageType};
 
@@ -79,10 +83,6 @@ impl<T> Sessions<T> {
             free: VecDeque::new(),
         }
     }
-
-    // pub fn get_mut(&mut self, id: &u64) -> Option<&mut T> {
-    //     self.inner.get_mut(id)
-    // }
 
     pub fn insert(&mut self, item: T) -> u64 {
         let id = if let Some(id) = self.free.pop_front() {
@@ -275,7 +275,9 @@ pub struct Request {
 }
 impl Request {
     pub fn new(service: u64, method: u64, body: impl EncodeBody) -> Self {
-        Request::from_message(Message::request(service, method, body))
+        Self {
+            message: Message::new_request(service, method, body),
+        }
     }
 
     pub fn from_message(message: Message) -> Self {
@@ -296,9 +298,6 @@ impl Request {
     pub(crate) fn address(&self) -> Address {
         self.message.address()
     }
-    // pub(crate) fn set_address(&mut self, address: Address) {
-    //     self.message.set_address(address)
-    // }
     pub(crate) fn take_message(self) -> Message {
         self.message
     }
@@ -361,6 +360,88 @@ pub struct Client {
 pub type OutgoingRequestSender = mpsc::Sender<(Message, oneshot::Sender<Message>)>;
 pub type OutgoingRequestReceiver = mpsc::Receiver<(Message, oneshot::Sender<Message>)>;
 
+pub struct RawRequestFuture<'a> {
+    state: RequestState<'a>,
+    onreply_rx: oneshot::Receiver<Message>,
+}
+pub type SendFuture<'a> = futures::sink::Send<
+    'a,
+    mpsc::Sender<(Message, oneshot::Sender<Message>)>,
+    (Message, oneshot::Sender<Message>),
+>;
+
+pub enum RequestState<'a> {
+    Sending(SendFuture<'a>),
+    Receiving,
+}
+
+pub struct RequestFuture<'a, T> {
+    inner: RawRequestFuture<'a>,
+    output: PhantomData<T>,
+}
+impl<'a, T> RequestFuture<'a, T> {
+    pub fn new(client: &'a mut Client, request: Request) -> Self {
+        Self {
+            inner: RawRequestFuture::new(client, request),
+            output: PhantomData,
+        }
+    }
+}
+
+// TODO: I don't know if I'm allowed to do this..
+impl<'a, T> Unpin for RequestFuture<'a, T> {}
+
+impl<'a, T> Future for RequestFuture<'a, T>
+where
+    T: ProstMessage + Default,
+{
+    type Output = Result<T>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let result = futures::ready!(self.inner.poll_unpin(cx));
+        let result: Result<T> = match result {
+            Err(err) => Err(err),
+            Ok(message) => message.body(),
+        };
+        Poll::Ready(result)
+    }
+}
+
+impl<'a> RawRequestFuture<'a> {
+    pub fn new(client: &'a mut Client, request: Request) -> Self {
+        let (reply_sender, onreply_rx) = oneshot::channel();
+        let message = request.take_message();
+        let send_future = client.request_sender.send((message, reply_sender));
+        Self {
+            state: RequestState::Sending(send_future),
+            onreply_rx,
+        }
+    }
+}
+
+impl<'a> Unpin for RawRequestFuture<'a> {}
+
+impl<'a> Future for RawRequestFuture<'a> {
+    type Output = Result<Message>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        loop {
+            self.state = match &mut self.state {
+                RequestState::Sending(ref mut future) => {
+                    let res = futures::ready!(Pin::new(future).poll(cx));
+                    let _ = res.unwrap();
+                    RequestState::Receiving
+                }
+                RequestState::Receiving => {
+                    let res = futures::ready!(Pin::new(&mut self.onreply_rx).poll(cx));
+                    let message = res.map_err(|_| Error::new(ErrorKind::Other, "Channel dropped"));
+                    // TODO: Remove unwrap.
+                    let message = message.unwrap();
+                    return Poll::Ready(Ok(message));
+                }
+            };
+        }
+    }
+}
+
 impl Client {
     pub fn new() -> (Self, OutgoingRequestReceiver) {
         let (sender, receiver) = mpsc::channel(100);
@@ -369,43 +450,27 @@ impl Client {
         };
         (client, receiver)
     }
-    pub async fn request(
-        &mut self,
+    pub fn request_raw<'a>(
+        &'a mut self,
         service: u64,
         method: u64,
         body: impl EncodeBody,
-    ) -> Result<Vec<u8>> {
+    ) -> RawRequestFuture<'a> {
         let request = Request::new(service, method, body);
-        let (reply_sender, onreply_recv) = oneshot::channel();
-
-        let message = request.take_message();
-        self.request_sender
-            .send((message, reply_sender))
-            .await
-            .unwrap();
-        let res = onreply_recv.await;
-        let message = res.map_err(|_| Error::new(ErrorKind::Other, "Channel dropped"))?;
-        if message.is_error() {
-            let error_message = String::from_utf8(message.body)
-                .unwrap_or("Error: Cannot decode error message".into());
-            Err(Error::new(ErrorKind::Other, error_message))
-        } else {
-            Ok(message.body)
-        }
+        RawRequestFuture::new(self, request)
     }
 
-    pub async fn request_into<T>(
-        &mut self,
+    pub fn request<'a, T>(
+        &'a mut self,
         service: u64,
         method: u64,
         body: impl EncodeBody,
-    ) -> Result<T>
+    ) -> RequestFuture<'a, T>
     where
         T: ProstMessage + Default,
     {
-        let response_body = self.request(service, method, body).await?;
-        let response_body = T::decode(&response_body[..])?;
-        Ok(response_body)
+        let request = Request::new(service, method, body);
+        RequestFuture::new(self, request)
     }
 }
 

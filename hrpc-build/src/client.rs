@@ -39,8 +39,8 @@ pub fn generate_methods(service: &prost_build::Service) -> TokenStream {
         let input_type = format_ident!("{}", method.input_type);
         let output_type = format_ident!("{}", method.output_type);
         stream.extend(quote! {
-            pub async fn #ident(&mut self, req: #input_type) -> Result<#output_type> {
-                self.0.request_into(Self::ID, #method_id, req).await
+            pub fn #ident(&mut self, req: #input_type) -> RequestFuture<'_, #output_type> {
+                self.0.request(Self::ID, #method_id, req)
             }
         });
     }
