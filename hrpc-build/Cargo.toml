@@ -17,12 +17,15 @@ keywords = ["rpc", "async", "codegen", "protobuf"]
 [package.metadata.docs.rs]
 all-features = true
 
-
 [dependencies]
 prost-build = "0.6"
 quote = "1.0"
 proc-macro2 = "1.0"
 heck = "0.3.1"
+prost = "0.6.1"
+varinteger = "1.0.6"
+prost-types = "0.6.1"
+tempfile = "3.1.0"
 
 [features]
 default = ["rustfmt"]

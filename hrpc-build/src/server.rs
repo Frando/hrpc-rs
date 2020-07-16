@@ -1,3 +1,4 @@
+use crate::HrpcOptions;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -45,7 +46,8 @@ pub fn generate_request_matches(service: &prost_build::Service) -> TokenStream {
     let mut stream = TokenStream::new();
     for (i, method) in service.methods.iter().enumerate() {
         // TODO: Fixed method ids.
-        let method_id = i as u64 + 1;
+        let method_id = method.options.id().unwrap_or_else(|| i as u64 + 1);
+        // let method_id = i as u64 + 1;
         let ident = format_ident!("{}", method.name);
         let input_type = format_ident!("{}", method.input_type);
         // let output_type = format_ident!("{}", method.input_type);

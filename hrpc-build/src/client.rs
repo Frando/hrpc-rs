@@ -1,3 +1,4 @@
+use crate::HrpcOptions;
 use heck::SnakeCase;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -34,7 +35,8 @@ pub fn generate_methods(service: &prost_build::Service) -> TokenStream {
 
     for (i, method) in service.methods.iter().enumerate() {
         // TODO: Support statically tagged methods.
-        let method_id = i as u64 + 1;
+        let method_id = method.options.id().unwrap_or_else(|| i as u64 + 1);
+        // let method_id = i as u64 + 1;
         let ident = format_ident!("{}", method.name);
         let input_type = format_ident!("{}", method.input_type);
         let output_type = format_ident!("{}", method.output_type);

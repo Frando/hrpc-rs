@@ -1,0 +1,14 @@
+syntax = "proto2";
+
+package hrpc;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.ServiceOptions {
+  optional uint32 service = 50000;
+}
+extend google.protobuf.MethodOptions {
+  optional uint32 method = 50001;
+}
+
+message Void {}
