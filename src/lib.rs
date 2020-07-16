@@ -14,7 +14,7 @@ pub use rpc::{
 };
 
 pub mod messages {
-    include!(concat!(env!("OUT_DIR"), "/hrpc.rs"));
+    include!(concat!(env!("OUT_DIR"), "/error.rs"));
 }
 
 pub mod encoding {

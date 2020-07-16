@@ -1,3 +1,3 @@
 fn main() {
-    prost_build::compile_protos(&["src/hrpc.proto"], &["src"]).unwrap();
+    prost_build::compile_protos(&["src/error.proto"], &["src"]).unwrap();
 }
