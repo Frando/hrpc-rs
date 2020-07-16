@@ -103,10 +103,10 @@ pub async fn main() -> Result<()> {
 }
 async fn read(mut core: RemoteHypercore, mut writer: impl AsyncWrite + Send + Unpin) -> Result<()> {
     use std::io::SeekFrom;
-    // let stream = core.to_stream(0, None, true);
-    // let mut async_read = stream.into_async_read();
-    let mut async_read = core.to_reader();
-    async_read.seek(SeekFrom::Start(8)).await?;
+    let stream = core.to_stream(0, None, true);
+    let mut async_read = stream.into_async_read();
+    // let mut async_read = core.to_reader();
+    // async_read.seek(SeekFrom::Start(8)).await?;
     async_std::io::copy(&mut async_read, &mut writer).await?;
     eprintln!("finished");
     Ok(())

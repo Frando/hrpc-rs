@@ -1,5 +1,5 @@
 pub mod codegen {
-    include!(concat!(env!("OUT_DIR"), "/codegen.rs"));
+    include!(concat!(env!("OUT_DIR"), "/hyperspace.rs"));
 }
 
 pub use codegen::*;

@@ -4,8 +4,12 @@ use crate::codegen::*;
 use crate::freemap::NamedMap;
 use futures::channel::mpsc;
 use futures::future;
+use futures::future::FutureExt;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 // use async_std::sync::{RwLock, RwLockReadGuard};
 use async_trait::async_trait;
 use hrpc::Rpc;
@@ -94,6 +98,28 @@ impl fmt::Debug for RemoteHypercore {
     }
 }
 
+pub struct GetFuture<'a> {
+    inner: hrpc::RequestFuture<'a, GetResponse>,
+}
+impl<'a> GetFuture<'a> {
+    fn new(client: &'a mut Client, request: GetRequest) -> Self {
+        let inner = client.hypercore.get(request);
+        Self { inner }
+    }
+}
+
+impl<'a> Future for GetFuture<'a> {
+    // type Output = Result<Vec<u8>>;
+    type Output = Result<Option<Vec<u8>>>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let result = futures::ready!(self.inner.poll_unpin(cx));
+        // let result = result.map(|r| r.block.unwrap_or_else(|| vec![]));
+        let result = result.map(|r| r.block);
+        Poll::Ready(result)
+    }
+}
+impl<'a> Unpin for GetFuture<'a> {}
+
 impl RemoteHypercore {
     pub(crate) fn new(corestore: &RemoteCorestore, key: Option<Key>, name: Option<String>) -> Self {
         let inner = InnerHypercore {
@@ -145,23 +171,22 @@ impl RemoteHypercore {
         Ok(())
     }
 
-    pub async fn get(&mut self, seq: u64) -> Result<Option<Vec<u8>>> {
+    // pub fn get<'a>(&'a mut self, seq: u64) -> GetFuture<'a> {
+    pub fn get<'a>(&'a mut self, seq: u64) -> impl Future<Output = Result<Option<Vec<u8>>>>  + 'a {
         let id = self.inner.read().id;
         let resource_id = self.resource_counter.fetch_add(1, Ordering::SeqCst);
-        let res = self
-            .client
-            .hypercore
-            .get(GetRequest {
-                id: id as u32,
-                seq,
-                resource_id,
-                wait: None,
-                if_available: None,
-                on_wait_id: None,
-            })
-            .await?;
-
-        Ok(res.block)
+        let request = GetRequest {
+            id: id as u32,
+            seq,
+            resource_id,
+            wait: None,
+            if_available: None,
+            on_wait_id: None,
+        };
+        let future = self.client.hypercore.get(request);
+        future.map(|result| result.map(|r| r.block))
+        // GetFuture::new(&mut self.client, request)
+        // let result = result.map(|r| r.block);
     }
 
     pub async fn seek(&mut self, byte_offset: u64) -> Result<(u64, usize)> {
