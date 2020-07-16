@@ -2,22 +2,21 @@ use crate::codegen;
 use crate::codegen::client::Client;
 use crate::codegen::*;
 use crate::freemap::NamedMap;
+use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::future;
 use futures::future::FutureExt;
 use futures::sink::SinkExt;
-use futures::stream::StreamExt;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-// use async_std::sync::{RwLock, RwLockReadGuard};
-use async_trait::async_trait;
 use hrpc::Rpc;
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::RwLock;
 use std::fmt;
+use std::future::Future;
 use std::io::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+// use std::pin::Pin;
+// use std::task::{Context, Poll};
+// use async_std::sync::{RwLock, RwLockReadGuard};
 
 use crate::{ByteStream, ReadStream};
 
@@ -98,28 +97,6 @@ impl fmt::Debug for RemoteHypercore {
     }
 }
 
-pub struct GetFuture<'a> {
-    inner: hrpc::RequestFuture<'a, GetResponse>,
-}
-impl<'a> GetFuture<'a> {
-    fn new(client: &'a mut Client, request: GetRequest) -> Self {
-        let inner = client.hypercore.get(request);
-        Self { inner }
-    }
-}
-
-impl<'a> Future for GetFuture<'a> {
-    // type Output = Result<Vec<u8>>;
-    type Output = Result<Option<Vec<u8>>>;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let result = futures::ready!(self.inner.poll_unpin(cx));
-        // let result = result.map(|r| r.block.unwrap_or_else(|| vec![]));
-        let result = result.map(|r| r.block);
-        Poll::Ready(result)
-    }
-}
-impl<'a> Unpin for GetFuture<'a> {}
-
 impl RemoteHypercore {
     pub(crate) fn new(corestore: &RemoteCorestore, key: Option<Key>, name: Option<String>) -> Self {
         let inner = InnerHypercore {
@@ -139,9 +116,9 @@ impl RemoteHypercore {
         self.inner.write().id = id;
     }
 
-    async fn id(&self) -> u64 {
-        self.inner.read().id
-    }
+    // async fn id(&self) -> u64 {
+    //     self.inner.read().id
+    // }
 
     pub fn len(&self) -> u64 {
         self.inner.read().length
@@ -171,8 +148,7 @@ impl RemoteHypercore {
         Ok(())
     }
 
-    // pub fn get<'a>(&'a mut self, seq: u64) -> GetFuture<'a> {
-    pub fn get<'a>(&'a mut self, seq: u64) -> impl Future<Output = Result<Option<Vec<u8>>>>  + 'a {
+    pub fn get<'a>(&'a mut self, seq: u64) -> impl Future<Output = Result<Option<Vec<u8>>>> + 'a {
         let id = self.inner.read().id;
         let resource_id = self.resource_counter.fetch_add(1, Ordering::SeqCst);
         let request = GetRequest {
@@ -185,8 +161,6 @@ impl RemoteHypercore {
         };
         let future = self.client.hypercore.get(request);
         future.map(|result| result.map(|r| r.block))
-        // GetFuture::new(&mut self.client, request)
-        // let result = result.map(|r| r.block);
     }
 
     pub async fn seek(&mut self, byte_offset: u64) -> Result<(u64, usize)> {
@@ -218,9 +192,9 @@ impl RemoteHypercore {
         self.inner.write().subscribe()
     }
 
-    pub(crate) async fn emit(&mut self, event: HypercoreEvent) {
-        self.inner.write().emit(event).await
-    }
+    // pub(crate) async fn emit(&mut self, event: HypercoreEvent) {
+    //     self.inner.write().emit(event).await
+    // }
 
     async fn open(&mut self) -> Result<()> {
         if self.inner.read().open {
@@ -281,10 +255,10 @@ impl InnerHypercore {
         self.listeners.push(send);
         recv
     }
-    async fn emit(&mut self, event: HypercoreEvent) {
-        let futs = self.listeners.iter_mut().map(|s| s.send(event.clone()));
-        let _ = future::join_all(futs).await;
-    }
+    // async fn emit(&mut self, event: HypercoreEvent) {
+    //     let futs = self.listeners.iter_mut().map(|s| s.send(event.clone()));
+    //     let _ = future::join_all(futs).await;
+    // }
 }
 
 impl fmt::Debug for InnerHypercore {
@@ -302,3 +276,25 @@ impl fmt::Debug for InnerHypercore {
         )
     }
 }
+
+// pub struct GetFuture<'a> {
+//     inner: hrpc::RequestFuture<'a, GetResponse>,
+// }
+// impl<'a> GetFuture<'a> {
+//     fn new(client: &'a mut Client, request: GetRequest) -> Self {
+//         let inner = client.hypercore.get(request);
+//         Self { inner }
+//     }
+// }
+
+// impl<'a> Future for GetFuture<'a> {
+//     // type Output = Result<Vec<u8>>;
+//     type Output = Result<Option<Vec<u8>>>;
+//     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+//         let result = futures::ready!(self.inner.poll_unpin(cx));
+//         // let result = result.map(|r| r.block.unwrap_or_else(|| vec![]));
+//         let result = result.map(|r| r.block);
+//         Poll::Ready(result)
+//     }
+// }
+// impl<'a> Unpin for GetFuture<'a> {}

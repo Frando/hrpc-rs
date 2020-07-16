@@ -61,20 +61,20 @@ where
             .or_insert_with(|| vec![key]);
     }
 
-    pub fn remove(&mut self, id: &u64) -> Option<V> {
-        if let Some(item) = self.map.remove(id) {
-            if let Some(names) = self.id_name.get(id) {
-                for name in names {
-                    self.name_id.remove(name);
-                }
-                self.id_name.remove(id);
-            }
-            self.free.push_back(*id);
-            Some(item)
-        } else {
-            None
-        }
-    }
+    // pub fn remove(&mut self, id: &u64) -> Option<V> {
+    //     if let Some(item) = self.map.remove(id) {
+    //         if let Some(names) = self.id_name.get(id) {
+    //             for name in names {
+    //                 self.name_id.remove(name);
+    //             }
+    //             self.id_name.remove(id);
+    //         }
+    //         self.free.push_back(*id);
+    //         Some(item)
+    //     } else {
+    //         None
+    //     }
+    // }
 }
 
 impl<K, V> NamedMap<K, V>
@@ -88,9 +88,9 @@ where
         Self { inner }
     }
 
-    pub fn insert(&mut self, value: V) -> u64 {
-        self.inner.write().insert(value)
-    }
+    // pub fn insert(&mut self, value: V) -> u64 {
+    //     self.inner.write().insert(value)
+    // }
 
     pub fn insert_with_name(&mut self, value: V, name: K) -> u64 {
         self.inner.write().insert_with_name(value, name)
@@ -116,7 +116,7 @@ where
         inner.set_name(id, key);
     }
 
-    pub fn remove(&mut self, id: &u64) -> Option<V> {
-        self.inner.write().remove(id)
-    }
+    // pub fn remove(&mut self, id: &u64) -> Option<V> {
+    //     self.inner.write().remove(id)
+    // }
 }

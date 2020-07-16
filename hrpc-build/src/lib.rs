@@ -107,9 +107,6 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
             let client_module = quote! {
                 pub mod client {
                     use super::*;
-                    use prost::Message;
-                    use hrpc::RequestFuture;
-                    use std::io::Result;
                     #wrapper
                     #clients
                 }
