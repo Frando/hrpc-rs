@@ -38,7 +38,7 @@ impl RemoteCorestore {
             sessions: NamedMap::new(),
             resource_counter: Arc::new(AtomicU64::new(1)),
         };
-        rpc.define_service(codegen::server::HypercoreServer::new(corestore.clone()));
+        rpc.define_service(codegen::server::HypercoreService::new(corestore.clone()));
         corestore
     }
 

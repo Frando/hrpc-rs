@@ -114,8 +114,8 @@ pub fn create_server() -> (Rpc, codegen::client::Client) {
 
     let app = Arc::new(App::default());
     let mut rpc = Rpc::new();
-    rpc.define_service(codegen::server::ShouterServer::new(app.clone()));
-    rpc.define_service(codegen::server::CalcServer::new(app));
+    rpc.define_service(codegen::server::ShouterService::new(app.clone()));
+    rpc.define_service(codegen::server::CalcService::new(app));
     let client = rpc.create_client(codegen::client::Client::new());
     (rpc, client)
 }

@@ -81,8 +81,8 @@ impl codegen::server::Calc for Arc<App> {
 }
 
 fn define_rpc(rpc: &mut Rpc, app: Arc<App>) -> codegen::client::Client {
-    rpc.define_service(codegen::server::ShouterServer::new(app.clone()));
-    rpc.define_service(codegen::server::CalcServer::new(app));
+    rpc.define_service(codegen::server::ShouterService::new(app.clone()));
+    rpc.define_service(codegen::server::CalcService::new(app));
     let client: codegen::client::Client = rpc.client().into();
     client
 }
