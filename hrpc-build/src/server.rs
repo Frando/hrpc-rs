@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 
 pub fn generate(service: &prost_build::Service, service_id: u64) -> TokenStream {
     let service_trait = quote::format_ident!("{}", service.name);
-    let service_struct = quote::format_ident!("{}Server", service.name);
+    let service_struct = quote::format_ident!("{}Service", service.name);
 
     let request_matches = generate_request_matches(service);
     let trait_methods = generate_trait_methods(service);
