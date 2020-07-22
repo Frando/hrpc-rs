@@ -53,33 +53,6 @@ where
             messages: VecDeque::new(),
         }
     }
-
-    fn parse(&mut self, cap: usize) -> Result<()> {
-        let mut parser = self.parser.take().unwrap();
-        let mut ptr = 0;
-        while ptr < cap {
-            let (consumed, message) = parser.recv(&self.buf[ptr..cap])?;
-            ptr += consumed;
-            if let Some(message) = message {
-                self.messages.push_back(message);
-            }
-            if consumed == 0 {
-                // TODO: See if we can enforce this statically.
-                unreachable!("Parser is broken: did not consume any bytes");
-            }
-        }
-        self.parser = Some(parser);
-        Ok(())
-    }
-}
-
-impl<R> FusedStream for Decoder<R>
-where
-    R: AsyncRead + Send + Unpin + 'static,
-{
-    fn is_terminated(&self) -> bool {
-        false
-    }
 }
 
 impl<R> Stream for Decoder<R>
@@ -101,8 +74,30 @@ where
             let n = futures::ready!(result)?;
 
             // Consume all the data we read.
-            self.parse(n)?;
+            let mut parser = self.parser.take().unwrap();
+            let mut ptr = 0;
+            while ptr < n {
+                let (consumed, message) = parser.recv(&self.buf[ptr..n])?;
+                ptr += consumed;
+                if let Some(message) = message {
+                    self.messages.push_back(message);
+                }
+                if consumed == 0 {
+                    // TODO: See if we can enforce this statically.
+                    unreachable!("Parser is broken: did not consume any bytes");
+                }
+            }
+            self.parser = Some(parser);
         }
+    }
+}
+
+impl<R> FusedStream for Decoder<R>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    fn is_terminated(&self) -> bool {
+        false
     }
 }
 

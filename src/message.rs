@@ -2,6 +2,7 @@ use prost::Message as ProstMessage;
 use std::fmt;
 use std::io::{Error, ErrorKind, Result};
 
+/// Encode a value into a byte vector.
 pub trait EncodeBody: Sized {
     fn encode_body(&self) -> Vec<u8>;
 }
@@ -19,6 +20,7 @@ where
     }
 }
 
+/// Message type
 #[derive(Debug, Clone)]
 pub enum MessageType {
     Request,
@@ -28,6 +30,7 @@ pub enum MessageType {
 
 type Address = (u64, u64, u64);
 
+/// HRPC wire message
 pub struct Message {
     pub typ: MessageType,
     pub service: u64,
@@ -38,14 +41,14 @@ pub struct Message {
 
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let body = match self.typ {
+            MessageType::Error => String::from_utf8(self.body.clone()).unwrap(),
+            _ => format!("[{}]", self.body.len()),
+        };
         write!(
             f,
-            "Message {{ typ {:?}, service {}, method {}, id {}, body len {} }}",
-            self.typ,
-            self.service,
-            self.method,
-            self.id,
-            self.body.len()
+            "Message {{ {:?}, s {} m {} id {}, body {} }}",
+            self.typ, self.service, self.method, self.id, body
         )
     }
 }

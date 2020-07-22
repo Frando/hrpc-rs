@@ -1,3 +1,11 @@
+//! hrpc is a bidirectional binary RPC protocol.
+//!
+//! It is a quite simple protocol, and this implementation supports automatic code generation
+//! from protocol buffer message and service definitions.
+//! See [`hrpc_build`][1] for docs for the code generation.
+//!
+//! [1]: /hrpc_build
+
 #![recursion_limit = "256"]
 
 mod decode;
