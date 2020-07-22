@@ -1,33 +1,19 @@
-// TODO: Cleanup
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
-use async_std::io;
-use async_std::net::{TcpListener, TcpStream};
-use async_std::prelude::*;
+use async_std::os::unix::net::{UnixListener, UnixStream};
 use async_std::sync::Arc;
 use async_std::task;
 use async_trait::async_trait;
 use env_logger::Env;
 use futures::stream::StreamExt;
-use hrpc::{Client, Decoder, Rpc};
+use hrpc::Rpc;
 use log::*;
-use std::collections::HashMap;
 use std::env;
-use std::io::{Error, Result};
+use std::io::Result;
 use std::sync::Mutex;
 
 pub mod codegen {
     include!(concat!(env!("OUT_DIR"), "/codegen.rs"));
 }
-
 use codegen::*;
-
-/// Print usage and exit.
-fn usage() {
-    println!("usage: cargo run --example basic -- [client|server] [port]");
-    std::process::exit(1);
-}
 
 #[async_std::main]
 pub async fn main() -> Result<()> {
@@ -35,31 +21,62 @@ pub async fn main() -> Result<()> {
 
     let mode = env::args().nth(1).unwrap_or("server".into());
     let path = "/tmp/hrpc.sock";
+    let app = App::default();
 
     match mode.as_ref() {
-        "server" => uds_server(path).await,
         "client" => {
-            let mut client = uds_client(path).await.unwrap();
+            let socket = UnixStream::connect(path).await?;
+            info!("connected to {}", path);
+            let mut rpc = Rpc::new();
+            rpc.define_service(codegen::server::CalcService::new(app.clone()));
+            let mut client: codegen::client::Client = rpc.client().into();
+            task::spawn(async move {
+                rpc.connect(socket).await.unwrap();
+            });
+            info!("I ask the server: hello, world");
             let res = client
                 .shouter
                 .shout(ShoutRequest {
-                    message: "hello uds".into(),
+                    message: "hello, world".into(),
                 })
                 .await?;
             info!("got response: {:?}", res);
             Ok(())
         }
-        _ => panic!(usage()),
+        "server" => {
+            let listener = UnixListener::bind(&path).await?;
+            info!("listening on {}", path);
+            let mut incoming = listener.incoming();
+            let app = app.clone();
+            while let Some(stream) = incoming.next().await {
+                let stream = stream?;
+                info!("new client connected");
+                let mut rpc = Rpc::new();
+                rpc.define_service(codegen::server::ShouterService::new(app.clone()));
+                let mut client: codegen::client::Client = rpc.client().into();
+                task::spawn(async move {
+                    rpc.connect(stream).await.unwrap();
+                });
+                info!("I ask the client: what is 3 + 5.3?");
+                let res = client.calc.add(AddRequest { a: 3f32, b: 5.3f32 }).await?;
+                info!("got response: {:?}", res);
+            }
+            Ok(())
+        }
+        _ => {
+            eprintln!("usage: cargo run --example basic -- [client|server]");
+            Ok(())
+        }
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct App {
-    loudness: Mutex<u64>,
+    loudness: Arc<Mutex<u64>>,
 }
 
 #[async_trait]
-impl codegen::server::Shouter for Arc<App> {
+impl codegen::server::Shouter for App {
     async fn shout(&mut self, req: ShoutRequest) -> Result<ShoutResponse> {
         info!("Shouter::shout {:?}", req);
         let mut loudness = self.loudness.lock().unwrap();
@@ -72,36 +89,10 @@ impl codegen::server::Shouter for Arc<App> {
 }
 
 #[async_trait]
-impl codegen::server::Calc for Arc<App> {
+impl codegen::server::Calc for App {
     async fn add(&mut self, req: AddRequest) -> std::io::Result<CalcResponse> {
         Ok(CalcResponse {
             result: req.a + req.b,
         })
     }
-}
-
-fn define_rpc(rpc: &mut Rpc, app: Arc<App>) -> codegen::client::Client {
-    rpc.define_service(codegen::server::ShouterService::new(app.clone()));
-    rpc.define_service(codegen::server::CalcService::new(app));
-    let client: codegen::client::Client = rpc.client().into();
-    client
-}
-
-async fn uds_server(path: &str) -> Result<()> {
-    let app = Arc::new(App::default());
-    let mut incoming =
-        hrpc::transport::uds::accept(path, Box::new(move |rpc| define_rpc(rpc, app.clone())))
-            .await?;
-    while let Some(_client) = incoming.next().await {
-        eprintln!("got new connection");
-    }
-    Ok(())
-}
-
-async fn uds_client(path: &str) -> Result<codegen::client::Client> {
-    let app = Arc::new(App::default());
-    let client =
-        hrpc::transport::uds::connect(path, Box::new(move |rpc| define_rpc(rpc, app.clone())))
-            .await?;
-    Ok(client)
 }

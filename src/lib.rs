@@ -13,7 +13,6 @@ mod message;
 #[macro_use]
 mod rpc;
 mod sessions;
-pub mod transport;
 
 pub use decode::Decoder;
 pub use message::Message;
