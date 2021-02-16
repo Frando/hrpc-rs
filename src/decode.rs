@@ -167,7 +167,15 @@ impl Parser {
                             _ => unreachable!(),
                         };
                         self.advance_state();
-                        Ok((consumed, None))
+                        if matches!(self.state, State::Message) && self.body_len == 0 {
+                            let message =
+                                Message::from_raw(self.header, self.method, self.id, vec![0u8; 0])?;
+                            self.reset();
+                            self.advance_state();
+                            Ok((consumed, Some(message)))
+                        } else {
+                            Ok((consumed, None))
+                        }
                     }
                 }
             }
