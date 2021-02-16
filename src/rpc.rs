@@ -1,5 +1,4 @@
 use crate::Decoder;
-use async_std::task;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::future::FutureExt;
@@ -109,118 +108,97 @@ impl Rpc {
         self.connect_rw(stream.clone(), stream).await
     }
 
-    pub async fn connect_rw<R, W>(self, reader: R, writer: W) -> Result<()>
+    pub async fn connect_rw<R, W>(self, reader: R, mut writer: W) -> Result<()>
     where
         R: AsyncRead + Send + Unpin + 'static,
         W: AsyncWrite + Send + Unpin + 'static,
     {
         let Self {
             out_request_rx,
-            services,
+            mut services,
             client: _client,
         } = self;
+        enum Event {
+            Incoming(Message),
+            Outgoing(Message),
+        }
 
         let sessions = ClientSessions::new();
 
-        let (out_message_tx, out_message_rx) = mpsc::channel(100);
+        let (mut out_message_tx, out_message_rx) = mpsc::channel(100);
 
-        let mut tasks = vec![];
+        let decoder = Decoder::decode(reader);
+        let stream_incoming =
+            decoder.map(|message| message.map(|message| Event::Incoming(message)));
 
-        // Task to handle incoming request.
-        tasks.push(task::spawn(task_incoming(
-            reader,
-            services,
-            sessions.clone(),
-            out_message_tx.clone(),
-        )));
+        let sessions_clone = sessions.clone();
+        let stream_outgoing = out_request_rx.map(move |out_request| {
+            let (mut message, reply_tx) = out_request;
+            let id = sessions_clone.insert(reply_tx);
+            message.set_request(id);
+            Ok(Event::Outgoing(message))
+        });
 
-        // Task to forward out client requests to the send task,
-        // while attaching session IDs.
-        tasks.push(task::spawn(task_request_sessions(
-            sessions,
-            out_request_rx,
-            out_message_tx.clone(),
-        )));
+        let events = futures::stream::select(stream_incoming, stream_outgoing);
+        let mut events = futures::stream::select(events, out_message_rx);
+        let mut send_buf = Vec::new();
 
-        // Task to send out messages.
-        tasks.push(task::spawn(task_outgoing(writer, out_message_rx)));
-
-        futures::future::select_all(tasks).await.0
-    }
-}
-
-/// Handle incoming requests.
-async fn task_incoming<R>(
-    reader: R,
-    mut services: Services,
-    sessions: ClientSessions,
-    mut out_message_tx: mpsc::Sender<Message>,
-) -> Result<()>
-where
-    R: AsyncRead + Send + Unpin + 'static,
-{
-    let mut decoder = Decoder::decode(reader);
-    while let Some(message) = decoder.next().await {
-        let message = message?;
-        debug!("recv {:?}", message);
-        match message.typ() {
-            // Incoming request.
-            MessageType::Request => {
-                let request = Request::from_message(message);
-                let response = services.handle_request(request).await;
-                if let Some(message) = response {
-                    // TODO: Handle channel drop error?
-                    out_message_tx.send(message).await.unwrap();
-                };
-            }
-            // Incoming response or error.
-            MessageType::Response | MessageType::Error => {
-                let reply_tx = sessions.take(&message.id);
-                if let Some(reply_tx) = reply_tx {
-                    // Ignore errors on dropped reply receivers.
-                    let _ = reply_tx.send(message);
-                } else {
-                    return Err(Error::new(
-                        ErrorKind::InvalidData,
-                        "Received response with invalid request ID",
-                    ));
+        while let Some(event) = events.next().await {
+            let event = event?;
+            match event {
+                // Incoming message.
+                Event::Incoming(message) => {
+                    debug!("recv {:?}", message);
+                    match message.typ() {
+                        // Incoming request.
+                        MessageType::Request => {
+                            let request = Request::from_message(message);
+                            let response = services.handle_request(request).await;
+                            if let Some(message) = response {
+                                // TODO: Handle channel drop error?
+                                out_message_tx
+                                    .send(Ok(Event::Outgoing(message)))
+                                    .await
+                                    .unwrap();
+                            };
+                        }
+                        // Incoming response or error.
+                        MessageType::Response | MessageType::Error => {
+                            let reply_tx = sessions.take(&message.id);
+                            if let Some(reply_tx) = reply_tx {
+                                // Ignore errors on dropped reply receivers.
+                                let _ = reply_tx.send(message);
+                            } else {
+                                return Err(Error::new(
+                                    ErrorKind::InvalidData,
+                                    "Received response with invalid request ID",
+                                ));
+                            }
+                        }
+                    };
+                }
+                Event::Outgoing(message) => {
+                    debug!("send {:?}", message);
+                    send_message(&mut writer, &mut send_buf, message).await?;
                 }
             }
-        };
+        }
+
+        Ok(())
     }
-    Ok(())
 }
 
-async fn task_request_sessions(
-    sessions: ClientSessions,
-    mut out_request_rx: OutRequestReceiver,
-    mut out_message_tx: mpsc::Sender<Message>,
-) -> Result<()> {
-    while let Some(out_request) = out_request_rx.next().await {
-        let (mut message, reply_tx) = out_request;
-        let id = sessions.insert(reply_tx);
-        message.set_request(id);
-        // TODO: Handle dropped channel / map err?
-        out_message_tx.send(message).await.unwrap();
-    }
-    Ok(())
-}
-
-async fn task_outgoing<W>(mut writer: W, mut out_message_rx: mpsc::Receiver<Message>) -> Result<()>
+async fn send_message<W>(writer: &mut W, buf: &mut Vec<u8>, message: Message) -> Result<()>
 where
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    let mut buf = Vec::new();
-    while let Some(message) = out_message_rx.next().await {
-        let len = message.encoded_len();
-        if len > buf.len() {
-            buf.resize(len, 0u8);
-        }
-        debug!("send {:?}", message);
-        message.encode(&mut buf[..len])?;
-        writer.write_all(&buf[..len]).await?;
-        writer.flush().await?;
+    let len = message.encoded_len();
+    if len > buf.len() {
+        buf.resize(len, 0u8);
     }
+    message.encode(&mut buf[..len])?;
+    writer.write_all(&buf[..len]).await?;
+    writer.flush().await?;
     Ok(())
 }
 
