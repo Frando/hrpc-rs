@@ -12,7 +12,10 @@ mod decode;
 mod message;
 #[macro_use]
 mod rpc;
-mod sessions;
+pub mod sessions;
+
+// next module - a redesign of the core API.
+pub mod next;
 
 pub use decode::Decoder;
 pub use message::Message;
