@@ -170,18 +170,28 @@ pub mod schema {
 
     pub mod demo_client {
         use super::*;
+
         pub mod calc {
             use super::*;
+            use CalcService::*;
+            use DemoServices::*;
+
             pub async fn add(
                 handle: &mut RpcHandle<DemoServices>,
                 req: AddRequest,
             ) -> Result<CalcResponse, RpcError> {
-                let req = DemoServices::Calc(CalcService::Add(Message::request(req)));
-                let res = handle.request(req).await?;
-                match res {
-                    DemoServices::Calc(CalcService::Add(message)) if message.is_response() => {
-                        Ok(message.into_response().unwrap())
-                    }
+                match handle.request(Calc, Add, req).await? {
+                    Calc(Add(message)) => message.into_response(),
+                    _ => Err(RpcError::MessageMismatch),
+                }
+            }
+
+            pub async fn square(
+                handle: &mut RpcHandle<DemoServices>,
+                req: SquareRequest,
+            ) -> Result<CalcResponse, RpcError> {
+                match handle.request(Calc, Square, req).await? {
+                    Calc(Square(message)) => message.into_response(),
                     _ => Err(RpcError::MessageMismatch),
                 }
             }
@@ -190,6 +200,8 @@ pub mod schema {
 
     pub mod demo_server {
         use super::*;
+        use CalcService::*;
+        use DemoServices::*;
 
         #[async_trait]
         pub trait CalcServer {
@@ -199,12 +211,15 @@ pub mod schema {
                 req: DemoServices,
             ) -> Result<(), RpcError> {
                 match req {
-                    DemoServices::Calc(CalcService::Add(message)) => {
-                        let req = message.as_request().unwrap();
-                        let res = self.on_add(req).await?;
-                        let res = DemoServices::Calc(CalcService::Add(message.reply(res)?));
-                        handle.request_no_reply(res).await?;
-                        Ok(())
+                    Calc(Add(message)) => {
+                        let req = message.as_request()?;
+                        let res = self.on_add(req).await;
+                        handle.reply(message, Calc, Add, res).await
+                    }
+                    Calc(Square(message)) => {
+                        let req = message.as_request()?;
+                        let res = self.on_square(req).await;
+                        handle.reply(message, Calc, Square, res).await
                     }
                     _ => Err(RpcError::MethodNotImplemented),
                 }
@@ -219,10 +234,12 @@ pub mod schema {
     }
 }
 
+use crate::ErrorMessage;
 use crate::{sessions::Sessions, Decoder, Message as RawMessage};
 use async_std::channel::{Receiver, Sender};
 use async_std::stream::StreamExt;
 use async_std::task::{self, JoinHandle};
+use prost::Message as ProstMessage;
 // use futures::channel::oneshot;
 use futures::{channel::oneshot, stream::Stream};
 // use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, Future, FutureExt};
@@ -250,8 +267,20 @@ pub enum RpcError {
     MessageMismatch,
     #[error("Method not implemented")]
     MethodNotImplemented,
-    #[error("Remote error: {message}")]
-    Remote { message: String },
+    #[error("Remote error: {}", .0.message)]
+    Remote(ErrorMessage),
+}
+
+impl RpcError {
+    fn to_message(&self) -> ErrorMessage {
+        match self {
+            RpcError::Remote(message) => message.clone(),
+            _ => ErrorMessage {
+                message: format!("{}", self),
+                ..Default::default()
+            },
+        }
+    }
 }
 
 impl From<io::Error> for RpcError {
@@ -260,7 +289,13 @@ impl From<io::Error> for RpcError {
     }
 }
 
-pub trait RpcMessageBody: prost::Message + Default {}
+impl From<ErrorMessage> for RpcError {
+    fn from(e: ErrorMessage) -> Self {
+        Self::Remote(e)
+    }
+}
+
+pub trait RpcMessageBody: prost::Message + Default + Sized + 'static {}
 
 pub trait Services: std::fmt::Debug + Sized + Send + 'static {
     fn from_parts(
@@ -273,7 +308,7 @@ pub trait Services: std::fmt::Debug + Sized + Send + 'static {
     fn service(&self) -> &dyn Service;
     fn service_mut(&mut self) -> &mut dyn Service;
 
-    fn encode(&self, buf: &mut [u8]) -> Result<(), prost::EncodeError> {
+    fn encode(&self, buf: &mut [u8]) -> Result<(), RpcError> {
         self.service().encode(buf)
     }
     fn encoded_len(&self) -> usize {
@@ -300,7 +335,7 @@ pub trait Service: std::fmt::Debug + Send + 'static {
         Self: Sized;
     fn inner_mut(&mut self) -> &mut dyn MessageT;
     fn inner(&self) -> &dyn MessageT;
-    fn encode(&self, buf: &mut [u8]) -> Result<(), prost::EncodeError> {
+    fn encode(&self, buf: &mut [u8]) -> Result<(), RpcError> {
         let service_id = self.service_id();
         let method_id = self.method_id();
         self.inner().encode(buf, service_id, method_id)
@@ -315,12 +350,7 @@ pub trait Service: std::fmt::Debug + Send + 'static {
 pub trait MessageT: std::fmt::Debug + Send + 'static {
     fn request_id(&self) -> u64;
     fn set_request_id(&mut self, request_id: u64);
-    fn encode(
-        &self,
-        buf: &mut [u8],
-        service_id: u64,
-        method_id: u64,
-    ) -> Result<(), prost::EncodeError>;
+    fn encode(&self, buf: &mut [u8], service_id: u64, method_id: u64) -> Result<(), RpcError>;
     fn encoded_len(&self, service_id: u64, method_id: u64) -> usize;
     fn is_response(&self) -> bool;
     fn is_request(&self) -> bool;
@@ -338,12 +368,7 @@ where
         self.request_id = request_id
     }
 
-    fn encode(
-        &self,
-        buf: &mut [u8],
-        service_id: u64,
-        method_id: u64,
-    ) -> Result<(), prost::EncodeError> {
+    fn encode(&self, buf: &mut [u8], service_id: u64, method_id: u64) -> Result<(), RpcError> {
         let mut offset = 0;
         offset += varinteger::encode(
             self.message_len(service_id, method_id) as u64,
@@ -360,8 +385,9 @@ where
         let message_len = self.message_len(service_id, method_id);
         message_len + varinteger::length(message_len as u64)
     }
+
     fn is_response(&self) -> bool {
-        matches!(self.body, Body::Response(_))
+        matches!(self.body, Body::Response(_) | Body::Error(_))
     }
 
     fn is_request(&self) -> bool {
@@ -387,57 +413,54 @@ where
     Req: prost::Message + Default + Sized,
     Res: prost::Message + Default + Sized,
 {
-    fn request(request: Req) -> Self {
+    pub fn request(request: Req) -> Self {
         Self {
             body: Body::Request(request),
             request_id: 0,
         }
     }
-    fn response(response: Res) -> Self {
+
+    pub fn response(response: Res) -> Self {
         Self {
             body: Body::Response(response),
             request_id: 0,
         }
     }
 
-    fn from_parts(typ: u8, request_id: u64, body: &[u8]) -> Result<Self, prost::DecodeError> {
+    pub fn from_parts(typ: u8, request_id: u64, body: &[u8]) -> Result<Self, prost::DecodeError> {
+        use prost::Message;
         let body = match typ {
             0 => Body::Request(Req::decode(body)?),
             1 => Body::Response(Res::decode(body)?),
+            2 => Body::Error(ErrorMessage::decode(body)?.into()),
             _ => return Err(prost::DecodeError::new("Invalid message type")),
         };
         Ok(Self { request_id, body })
     }
 
-    fn body(&self) -> &Body<Req, Res> {
+    pub fn body(&self) -> &Body<Req, Res> {
         &self.body
     }
 
-    pub fn as_request(&self) -> Option<&Req> {
+    pub fn as_request(&self) -> Result<&Req, RpcError> {
         match &self.body {
-            Body::Request(req) => Some(req),
-            _ => None,
+            Body::Request(req) => Ok(req),
+            _ => Err(RpcError::MessageMismatch),
         }
     }
 
-    pub fn as_response(&self) -> Option<&Res> {
+    pub fn as_response(&self) -> Result<&Res, RpcError> {
         match &self.body {
-            Body::Response(res) => Some(res),
-            _ => None,
+            Body::Response(res) => Ok(res),
+            _ => Err(RpcError::MessageMismatch),
         }
     }
 
-    pub fn into_response(self) -> Option<Res> {
+    pub fn into_response(self) -> Result<Res, RpcError> {
         match self.body {
-            Body::Response(res) => Some(res),
-            _ => None,
-        }
-    }
-
-    pub fn into_request(self) -> Option<Req> {
-        match self.body {
-            Body::Request(req) => Some(req),
-            _ => None,
+            Body::Response(res) => Ok(res),
+            Body::Error(err) => Err(err),
+            Body::Request(_) => Err(RpcError::MessageMismatch),
         }
     }
 
@@ -449,19 +472,36 @@ where
         self.body = body
     }
 
-    pub fn reply(&self, response: Res) -> Result<Message<Req, Res>, RpcError>
-// where
-    //     F: Fn(Message<Req, Res>) -> S,
-    {
+    pub fn reply(&self, response: Result<Res, RpcError>) -> Result<Message<Req, Res>, RpcError> {
         if !matches!(self.body, Body::Request(_)) {
             Err(RpcError::MessageMismatch)
         } else {
+            let body = match response {
+                Ok(res) => Body::Response(res),
+                Err(e) => Body::Error(e),
+            };
             let message = Self {
                 request_id: self.request_id,
-                body: Body::Response(response),
+                body,
             };
-            // let message = map(message);
             Ok(message)
+        }
+    }
+
+    pub fn encode_body(&self, mut buf: &mut [u8]) -> Result<(), RpcError> {
+        match &self.body {
+            Body::Request(req) => req.encode(&mut buf)?,
+            Body::Response(res) => res.encode(&mut buf)?,
+            Body::Error(e) => e.to_message().encode(&mut buf)?,
+        };
+        Ok(())
+    }
+
+    pub fn encoded_body_len(&self) -> usize {
+        match &self.body {
+            Body::Request(req) => req.encoded_len(),
+            Body::Response(res) => res.encoded_len(),
+            Body::Error(e) => e.to_message().encoded_len(),
         }
     }
 
@@ -483,28 +523,6 @@ where
     fn header(&self, service_id: u64) -> u64 {
         (service_id << 2) | self.typ() as u64
     }
-
-    // fn header_len(&self, ) -> u64 {
-    //     varinteger::length(self.header())
-    //         + varinteger::length(self.method)
-    //         + varinteger::length(self.id)
-    // }
-
-    pub fn encode_body(&self, mut buf: &mut [u8]) -> Result<(), prost::EncodeError> {
-        match &self.body {
-            Body::Request(req) => req.encode(&mut buf),
-            Body::Response(res) => res.encode(&mut buf),
-            Body::Error(_e) => panic!("not yet supported"),
-        }
-    }
-
-    pub fn encoded_body_len(&self) -> usize {
-        match &self.body {
-            Body::Request(req) => req.encoded_len(),
-            Body::Response(res) => res.encoded_len(),
-            Body::Error(_e) => panic!("not yet supported"),
-        }
-    }
 }
 
 pub type OutboundRequest<S> = (S, Option<oneshot::Sender<S>>);
@@ -512,8 +530,7 @@ pub type OutboundRequest<S> = (S, Option<oneshot::Sender<S>>);
 pub struct RpcHandle<S> {
     pub task: JoinHandle<Result<(), RpcError>>,
     outbound_tx: Sender<OutboundRequest<S>>,
-    inbound_rx: Receiver<S>,
-    // cancel_tx: oneshot::Sender<oneshot::Sender<()>>,
+    inbound_rx: Option<Receiver<S>>,
 }
 
 impl<S> Future for RpcHandle<S> {
@@ -522,45 +539,101 @@ impl<S> Future for RpcHandle<S> {
         Pin::new(&mut self.task).poll(cx)
     }
 }
+fn upcast<Co, Ci, S, Si, Req, Res>(outer_c: Co, inner_c: Ci, message: Message<Req, Res>) -> S
+where
+    Co: Fn(Si) -> S,
+    Ci: Fn(Message<Req, Res>) -> Si,
+{
+    let service = (inner_c)(message);
+    let services = (outer_c)(service);
+    services
+}
 
 impl<S> RpcHandle<S>
 where
     S: Services,
 {
-    pub async fn request(&self, request: S) -> Result<S, RpcError> {
+    pub async fn send_request(&self, message: S) -> Result<S, RpcError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.outbound_tx
-            .send((request, Some(reply_tx)))
+            .send((message, Some(reply_tx)))
             .await
             .unwrap();
         Ok(reply_rx.await.unwrap())
     }
 
-    pub async fn request_no_reply(&self, request: S) -> Result<(), RpcError> {
-        self.outbound_tx.send((request, None)).await.unwrap();
+    pub async fn send_no_reply(&self, message: S) -> Result<(), RpcError> {
+        self.outbound_tx.send((message, None)).await.unwrap();
         Ok(())
     }
 
-    // pub async fn cancel(self) {
-    //     let (oncancel_tx, oncancel_rx) = oneshot::channel();
-    //     self.cancel_tx.send(oncancel_tx).unwrap();
-    //     oncancel_rx.await.unwrap();
-    //     // self.task.cancel().await
-    // }
+    pub async fn request<CS, CM, Me, Req, Res>(
+        &self,
+        service: CS,
+        method: CM,
+        request: Req,
+    ) -> Result<S, RpcError>
+    where
+        CS: Fn(Me) -> S,
+        CM: Fn(Message<Req, Res>) -> Me,
+        Req: prost::Message + Default + Sized + 'static,
+        Res: prost::Message + Default + Sized + 'static,
+    {
+        let message = Message::request(request);
+        let wrapped = (service)((method)(message));
+        let reply = self.send_request(wrapped).await;
+        reply
+    }
 
-    // pub async fn reply<Req,Res>(&self, request: Message<Req,Res>, mut response: Res) -> Result<(), RpcError> {
-    //     let response = request.inner().reply(response);
-    //     // let request_id = request.inner().request_id();
-    //     // response.inner_mut().set_request_id(request_id);
-    //     self.outbound_tx.send((response, None)).await.unwrap();
-    //     Ok(())
-    // }
+    pub async fn request_no_reply<CS, CM, Me, Req, Res>(
+        &self,
+        service: CS,
+        method: CM,
+        request: Req,
+    ) -> Result<(), RpcError>
+    where
+        CS: Fn(Me) -> S,
+        CM: Fn(Message<Req, Res>) -> Me,
+        Req: prost::Message + Default + Sized + 'static,
+        Res: prost::Message + Default + Sized + 'static,
+    {
+        let message = Message::request(request);
+        let wrapped = (service)((method)(message));
+        self.send_no_reply(wrapped).await
+    }
+
+    pub async fn reply<CS, CM, Me, Req, Res>(
+        &self,
+        request_message: Message<Req, Res>,
+        service: CS,
+        method: CM,
+        response: Result<Res, RpcError>,
+    ) -> Result<(), RpcError>
+    where
+        CS: Fn(Me) -> S,
+        CM: Fn(Message<Req, Res>) -> Me,
+        Req: prost::Message + Default + Sized + 'static,
+        Res: prost::Message + Default + Sized + 'static,
+    {
+        let message = request_message.reply(response)?;
+        let wrapped = (service)((method)(message));
+        self.send_no_reply(wrapped).await?;
+        Ok(())
+    }
+
+    pub fn take_receiver(&mut self) -> Option<Receiver<S>> {
+        self.inbound_rx.take()
+    }
 }
 
 impl<S> Stream for RpcHandle<S> {
     type Item = S;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inbound_rx).poll_next(cx)
+        if let Some(inbound_rx) = self.inbound_rx.as_mut() {
+            Pin::new(inbound_rx).poll_next(cx)
+        } else {
+            Poll::Ready(None)
+        }
     }
 }
 
@@ -568,14 +641,9 @@ impl<S> Stream for RpcHandle<S> {
 pub enum Event<S> {
     Inbound(Result<S, RpcError>),
     Outbound(OutboundRequest<S>),
-    // Cancel(Result<oneshot::Sender<()>, Canceled>),
 }
 
-pub fn run_rpc<S, R, W>(
-    // rpc: Rpc<Req, Res>,
-    reader: R,
-    writer: W,
-) -> Result<RpcHandle<S>, RpcError>
+pub fn run_rpc<S, R, W>(reader: R, writer: W) -> Result<RpcHandle<S>, RpcError>
 where
     S: Services + Send + Unpin + 'static,
     R: AsyncRead + Send + Unpin + 'static,
@@ -583,30 +651,20 @@ where
 {
     let (outbound_tx, outbound_rx) = async_channel::unbounded();
     let (inbound_tx, inbound_rx) = async_channel::unbounded();
-    // let (cancel_tx, cancel_rx) = oneshot::channel();
-    let task = task::spawn(run_loop::<S, R, W>(
-        reader,
-        writer,
-        outbound_rx,
-        inbound_tx,
-        // cancel_rx,
-    ));
+    let task = task::spawn(run_loop::<S, R, W>(reader, writer, outbound_rx, inbound_tx));
     let handle = RpcHandle {
         task,
         outbound_tx,
-        inbound_rx,
-        // cancel_tx,
+        inbound_rx: Some(inbound_rx),
     };
     Ok(handle)
 }
 
 async fn run_loop<S, R, W>(
-    // rpc: Rpc<Req, Res>,
     reader: R,
     mut writer: W,
     outbound_rx: Receiver<OutboundRequest<S>>,
     inbound_tx: Sender<S>,
-    // cancel_rx: oneshot::Receiver<oneshot::Sender<()>>,
 ) -> Result<(), RpcError>
 where
     S: Services,
@@ -617,9 +675,6 @@ where
         .map(upcast_message::<S>)
         .map(Event::Inbound);
     let outbound_rx = outbound_rx.map(Event::Outbound);
-    // let cancel_rx = cancel_rx.into_stream();
-    // let cancel_rx = cancel_rx.map(|oncancel_tx| Event::Cancel(oncancel_tx));
-    // let mut events = inbound.merge(outbound_rx).merge(cancel_rx);
     let mut events = inbound.merge(outbound_rx);
 
     let sessions: Sessions<oneshot::Sender<S>> = Sessions::new();
@@ -638,7 +693,9 @@ where
                     if let Some(reply_tx) = sessions.take(&request_id) {
                         reply_tx.send(message).unwrap();
                     } else {
-                        // TODO: Report error?
+                        // We received a reply or an error with a request_id
+                        // that we did not prepare.
+                        // TODO: What to do here - return with error, ignore?
                     }
                 } else {
                     inbound_tx.send(message).await.unwrap();
@@ -654,13 +711,7 @@ where
                     }
                 }
                 send_message(&mut writer, message, &mut write_buf).await?;
-            } // Event::Cancel(oncancel_tx) => {
-              //     log::debug!("cancel");
-              //     if let Ok(oncancel_tx) = oncancel_tx {
-              //         oncancel_tx.send(()).unwrap();
-              //     }
-              //     return Ok(());
-              // }
+            }
         }
     }
     Ok(())
@@ -702,9 +753,10 @@ where
 pub mod tests {
     use super::schema::*;
     use super::*;
-    use async_std::prelude::FutureExt;
+    use async_std::prelude::*;
     use async_std::task;
     use async_trait::async_trait;
+    use futures::future::FutureExt as FuturesFutureExt;
 
     // "Server"
     struct MyState;
@@ -715,6 +767,14 @@ pub mod tests {
             Ok(CalcResponse {
                 result: req.a + req.b,
             })
+        }
+        async fn on_square(&mut self, req: &SquareRequest) -> Result<CalcResponse, RpcError> {
+            if req.num == 0 {
+                Err(RpcError::Remote(ErrorMessage::new("dont square the zero")))
+            } else {
+                let result = req.num * req.num;
+                Ok(CalcResponse { result })
+            }
         }
     }
 
@@ -728,18 +788,37 @@ pub mod tests {
         let mut handle_a = run_rpc::<DemoServices, _, _>(ra, wa)?;
         let mut handle_b = run_rpc::<DemoServices, _, _>(rb, wb)?;
 
+        let (close_tx, close_rx) = oneshot::channel::<()>();
+
         // "Client"
         let task_a: TaskHandle = task::spawn(async move {
             let res = demo_client::calc::add(&mut handle_a, AddRequest { a: 2, b: 13 }).await?;
             assert_eq!(res, CalcResponse { result: 15 });
+            let res = demo_client::calc::square(&mut handle_a, SquareRequest { num: 0 }).await;
+            match res {
+                Err(RpcError::Remote(e)) => assert_eq!(&e.message, "dont square the zero"),
+                _ => panic!("expected error, got ok"),
+            }
+            close_tx.send(()).unwrap();
             Ok(())
         });
 
         // "Server"
         let task_b: TaskHandle = task::spawn(async move {
+            enum Event {
+                Request(DemoServices),
+                Cancel,
+            }
+            let mut events = StreamExt::map(handle_b.take_receiver().unwrap(), Event::Request)
+                .merge(close_rx.into_stream().map(|_e| Event::Cancel));
             let mut state = MyState {};
-            if let Some(incoming) = handle_b.next().await {
-                state.handle_request(&mut handle_b, incoming).await?;
+            while let Some(event) = events.next().await {
+                match event {
+                    Event::Request(request) => {
+                        state.handle_request(&mut handle_b, request).await?;
+                    }
+                    Event::Cancel => return Ok(()),
+                }
             }
             Ok(())
         });
@@ -775,7 +854,7 @@ pub mod tests {
 //     _ => {}
 // }
 
-// fn encode(&self, buf: &mut [u8]) -> Result<(), prost::EncodeError> {
+// fn encode(&self, buf: &mut [u8]) -> Result<(), RpcError> {
 //     match self {
 //         Self::Calc(service) => service.encode(buf),
 //         Self::Text(service) => service.encode(buf),
@@ -815,4 +894,54 @@ pub mod tests {
 //             Self::Text(method) => method.method_id(),
 //         }
 //     }
+// }
+//
+//
+// VARIANTS FOR CLIENT CODEGEN
+//
+// macro_rules! matches {
+//     ($expression:expr, $( $pattern:pat )|+ $( if $guard: expr )? $(,)?) => {
+//         match $expression {
+//             $( $pattern )|+ $( if $guard )? => true,
+//             _ => false
+//         }
+//     }
+// }
+// let req = Calc(Add(Message::request(req)));
+// let res = handle.request(req).await?;
+// let req = upcast(DemoServices::Calc, CalcService::Add, Message::request(req));
+// let req = upcast(Calc, Add, Message::request(req));
+// let req = DemoServices::Calc(CalcService::Add(Message::request(req)));
+// match_response!(message, Calc(Add(message)));
+// match res {
+//     DemoServices::Calc(CalcService::Add(message)) if message.is_response() => {
+//         message.into_response()
+//     }
+//     _ => Err(RpcError::MessageMismatch),
+// }
+//
+//
+//
+//
+// OLD SERVER handle_request
+// let res = DemoServices::Calc(CalcService::Add(message.reply(res)?));
+// handle.request_no_reply(res).await?;
+// Ok(())
+
+// pub async fn request<Req>(&self, request: Req) -> S {
+// }
+
+// pub async fn cancel(self) {
+//     let (oncancel_tx, oncancel_rx) = oneshot::channel();
+//     self.cancel_tx.send(oncancel_tx).unwrap();
+//     oncancel_rx.await.unwrap();
+//     // self.task.cancel().await
+// }
+
+// pub async fn reply<Req,Res>(&self, request: Message<Req,Res>, mut response: Res) -> Result<(), RpcError> {
+//     let response = request.inner().reply(response);
+//     // let request_id = request.inner().request_id();
+//     // response.inner_mut().set_request_id(request_id);
+//     self.outbound_tx.send((response, None)).await.unwrap();
+//     Ok(())
 // }

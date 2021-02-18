@@ -27,6 +27,17 @@ pub mod messages {
     include!(concat!(env!("OUT_DIR"), "/error.rs"));
 }
 
+pub use messages::RpcError as ErrorMessage;
+
+impl ErrorMessage {
+    pub fn new(message: impl ToString) -> Self {
+        Self {
+            message: message.to_string(),
+            ..Default::default()
+        }
+    }
+}
+
 pub mod encoding {
     pub type Void = ();
 }
